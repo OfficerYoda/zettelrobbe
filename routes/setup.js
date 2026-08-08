@@ -18,6 +18,8 @@ const {
   validateCustomFieldValue,
   shouldQueueForOcrOnAiError,
   classifyOcrQueueReasonFromAiError,
+  stripTrailingSlashes,
+  toNameList,
 } = require('../services/serviceUtils');
 const jwt = require('jsonwebtoken');
 const bcrypt = require('bcryptjs');
@@ -27,10 +29,14 @@ const customService = require('../services/customService.js');
 const mistralOcrService = require('../services/mistralOcrService');
 const quickstartService = require('../services/quickstartService');
 const reconciliationService = require('../services/reconciliationService');
+const scanHealthService = require('../services/scanHealthService');
 const {
   THUMBNAIL_CACHE_DIR,
   getThumbnailCachePath,
 } = require('../services/thumbnailCachePaths');
+const {
+  sanitizeConfigForBootstrap,
+} = require('../services/bootstrapConfigSanitizer');
 const config = require('../config/config.js');
 require('dotenv').config({ path: '../data/.env' });
 
@@ -220,7 +226,8 @@ async function removeThumbnailCacheForDocumentIds(ids) {
     } catch (error) {
       if (error.code !== 'ENOENT') {
         console.warn(
-          `[WARN] Failed to delete cached thumbnail ${thumbnailPath}:`,
+          '[WARN] Failed to delete cached thumbnail %s:',
+          thumbnailPath,
           error.message
         );
       }
@@ -645,7 +652,9 @@ function generateBase32Secret(length = 32) {
   let output = '';
 
   for (let i = 0; i < length; i += 1) {
-    output += alphabet[bytes[i] % alphabet.length];
+    // The alphabet holds exactly 32 characters, so masking the low 5 bits maps
+    // each random byte onto it uniformly instead of relying on a biased modulo.
+    output += alphabet[bytes[i] & 0x1f];
   }
 
   return output;
@@ -3566,10 +3575,7 @@ function cleanupExpiredSetupMfaChallenges() {
 }
 
 function normalizeSetupBaseUrl(url) {
-  return String(url || '')
-    .trim()
-    .replace(/\/+$/, '')
-    .replace(/\/api$/, '');
+  return stripTrailingSlashes(String(url || '').trim()).replace(/\/api$/, '');
 }
 
 function parseBooleanInput(value, defaultValue = false) {
@@ -4226,24 +4232,6 @@ async function detectQuickstartForSetup({
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-// Helper: Sanitize config for bootstrap (remove secrets)
-function sanitizeConfigForBootstrap(config) {
-  const sanitized = { ...config };
-  const secretFields = [
-    'PAPERLESS_API_TOKEN',
-    'OPENAI_API_KEY',
-    'OLLAMA_API_KEY',
-    'CUSTOM_API_KEY',
-    'AZURE_API_KEY',
-    'OCR_API_KEY',
-    'MISTRAL_API_KEY',
-  ];
-  secretFields.forEach((field) => {
-    delete sanitized[field];
-  });
-  return sanitized;
-}
-
 router.get('/setup', async (req, res) => {
   try {
     // SECURITY: Check setup state first to detect degraded conditions
@@ -5840,9 +5828,12 @@ async function processQueue(customPrompt) {
       paperlessService.getOwnUserID(),
     ]);
 
-    const existingDocumentTypesList = existingDocumentTypes.map(
-      (docType) => docType.name
-    );
+    // The paperlessService helpers return entity objects, so every list has to
+    // be reduced to plain names before it reaches the AI services — otherwise
+    // the "Pre-existing ..." prompt blocks render as "[object Object]".
+    const existingTagNames = toNameList(existingTags);
+    const existingCorrespondentNames = toNameList(existingCorrespondentList);
+    const existingDocumentTypesList = toNameList(existingDocumentTypes);
 
     while (documentQueue.length > 0) {
       const doc = documentQueue.shift();
@@ -5850,8 +5841,8 @@ async function processQueue(customPrompt) {
       try {
         const result = await processDocument(
           doc,
-          existingTags,
-          existingCorrespondentList,
+          existingTagNames,
+          existingCorrespondentNames,
           existingDocumentTypesList,
           ownUserId,
           customPrompt
@@ -7276,16 +7267,12 @@ router.post(
 router.post('/manual/analyze', express.json(), async (req, res) => {
   try {
     const { content, id } = req.body;
-    let existingCorrespondentList =
-      await paperlessService.listCorrespondentsNames();
-    existingCorrespondentList = existingCorrespondentList.map(
-      (correspondent) => correspondent.name
+    const existingCorrespondentList = toNameList(
+      await paperlessService.listCorrespondentsNames()
     );
-    let existingTagsList = await paperlessService.listTagNames();
-    existingTagsList = existingTagsList.map((tags) => tags.name);
-    let existingDocumentTypes = await paperlessService.listDocumentTypesNames();
-    let existingDocumentTypesList = existingDocumentTypes.map(
-      (docType) => docType.name
+    const existingTagsList = toNameList(await paperlessService.listTagNames());
+    const existingDocumentTypesList = toNameList(
+      await paperlessService.listDocumentTypesNames()
     );
 
     if (!content || typeof content !== 'string') {
@@ -7636,14 +7623,57 @@ router.post('/manual/updateDocument', express.json(), async (req, res) => {
 });
 
 /**
+ * Builds the scanner/Paperless section of the health payload.
+ * Shared by /health and /api/processing-status so both report the same state.
+ */
+function buildScannerHealthSnapshot() {
+  const scanner = scanHealthService.getState();
+  const scanState = global.__paperlessAiScanControl || {};
+
+  return {
+    scanner: {
+      automaticProcessingEnabled: scanner.automaticProcessingEnabled,
+      armed: scanner.armed,
+      running: Boolean(scanState.running),
+      scanInterval: scanner.scanInterval,
+      lastRunStartedAt: scanner.lastRunStartedAt,
+      lastRunFinishedAt: scanner.lastRunFinishedAt,
+      lastRunSource: scanner.lastRunSource,
+      lastRunStatus: scanner.lastRunStatus,
+      lastSuccessfulRunAt: scanner.lastSuccessfulRunAt,
+      consecutiveFailures: scanner.consecutiveFailures,
+      failureThreshold: scanner.failureThreshold,
+      degraded: scanner.degraded,
+      lastError: scanner.lastError,
+    },
+    paperless: {
+      reachable: scanner.paperless.reachable,
+      lastCheckedAt: scanner.paperless.lastCheckedAt,
+      error: scanner.paperless.error,
+    },
+  };
+}
+
+/**
  * @swagger
  * /health:
  *   get:
  *     summary: System health check endpoint
  *     description: |
- *       Provides information about the current system health status.
- *       This endpoint checks database connectivity and returns system operational status.
- *       Used for monitoring and automated health checks.
+ *       Reports database connectivity **and** whether the document scanner is
+ *       actually able to work. Used by the Docker healthcheck and monitoring.
+ *
+ *       `status` is `healthy` when the database is reachable and the scanner is
+ *       operational, `degraded` when automatic processing is enabled but the
+ *       scan loop is not armed or has failed `failureThreshold` runs in a row
+ *       (for example because Paperless-ngx is unreachable), and `database_error`
+ *       when the local database cannot be queried.
+ *
+ *       A `degraded` state answers with HTTP 503 unless `HEALTHCHECK_STRICT=no`
+ *       is configured, in which case the details are reported with HTTP 200.
+ *       When automatic processing is switched off via
+ *       `DISABLE_AUTOMATIC_PROCESSING=yes`, a missing scan loop is expected and
+ *       never reported as degraded.
  *     tags:
  *       - System
  *     responses:
@@ -7652,12 +7682,7 @@ router.post('/manual/updateDocument', express.json(), async (req, res) => {
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 status:
- *                   type: string
- *                   description: Health status of the system
- *                   example: "healthy"
+ *               $ref: '#/components/schemas/HealthResponse'
  *       500:
  *         description: Internal server error
  *         content:
@@ -7674,30 +7699,16 @@ router.post('/manual/updateDocument', express.json(), async (req, res) => {
  *                   description: Error message details
  *                   example: "Internal server error"
  *       503:
- *         description: Service unavailable
+ *         description: |
+ *           Service unavailable — either the database check failed
+ *           (`database_error`) or the scanner is degraded (`degraded`).
  *         content:
  *           application/json:
  *             schema:
- *               type: object
- *               properties:
- *                 status:
- *                   type: string
- *                   description: Status indicating database error
- *                   example: "database_error"
- *                 message:
- *                   type: string
- *                   description: Details about the service unavailability
- *                   example: "Database check failed"
+ *               $ref: '#/components/schemas/HealthResponse'
  */
 router.get('/health', async (req, res) => {
   try {
-    // const isConfigured = await setupService.isConfigured();
-    // if (!isConfigured) {
-    //   return res.status(503).json({
-    //     status: 'not_configured',
-    //     message: 'Application setup not completed'
-    //   });
-    // }
     try {
       await documentModel.isDocumentProcessed(1);
     } catch {
@@ -7707,7 +7718,25 @@ router.get('/health', async (req, res) => {
       });
     }
 
-    res.json({ status: 'healthy' });
+    const snapshot = buildScannerHealthSnapshot();
+    const degraded = snapshot.scanner.degraded;
+    const payload = {
+      status: degraded ? 'degraded' : 'healthy',
+      database: 'ok',
+      ...snapshot,
+    };
+
+    if (degraded) {
+      payload.message = snapshot.scanner.armed
+        ? `Document scan failed ${snapshot.scanner.consecutiveFailures} time(s) in a row: ${snapshot.scanner.lastError || 'unknown error'}`
+        : 'Document scan scheduler is not armed';
+
+      if (scanHealthService.strictHealthEnabled) {
+        return res.status(503).json(payload);
+      }
+    }
+
+    res.json(payload);
   } catch (error) {
     console.error('Health check failed:', error);
     res.status(500).json({
@@ -8597,6 +8626,10 @@ router.post('/settings', express.json(), async (req, res) => {
  *                   type: boolean
  *                   description: Whether a graceful stop has been requested
  *                   example: false
+ *                 scanner:
+ *                   $ref: '#/components/schemas/ScannerHealth'
+ *                 paperless:
+ *                   $ref: '#/components/schemas/PaperlessHealth'
  *                 currentlyProcessing:
  *                   type: object
  *                   description: Details about the document currently being processed (if any)
@@ -8642,6 +8675,7 @@ router.get('/api/processing-status', isAuthenticated, async (req, res) => {
       ...status,
       isScanning: Boolean(scanState.running),
       stopRequested: Boolean(scanState.stopRequested),
+      ...buildScannerHealthSnapshot(),
     });
   } catch {
     res.status(500).json({ error: 'Failed to fetch processing status' });

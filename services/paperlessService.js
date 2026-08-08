@@ -1,10 +1,15 @@
 // services/paperlessService.js
 const axios = require('axios');
 const config = require('../config/config');
-const fs = require('fs');
-const path = require('path');
 const { parse, isValid, parseISO, format } = require('date-fns');
-const { validateUrlAgainstBase } = require('./serviceUtils');
+const {
+  validateUrlAgainstBase,
+  stripTrailingSlashes,
+  createRedirectGuard,
+} = require('./serviceUtils');
+
+/** Timeout for the connectivity probe so a hanging host cannot stall a scan. */
+const CONNECTION_PROBE_TIMEOUT_MS = 10000;
 
 class PaperlessService {
   constructor() {
@@ -19,7 +24,7 @@ class PaperlessService {
     this._publicBaseUrlCache = {
       value: null,
       source: null,
-      expiresAt: 0
+      expiresAt: 0,
     };
     this._publicBaseUrlCacheTtlMs = 5 * 60 * 1000;
     // Dynamic cache lifetime from config (default: 5 minutes)
@@ -38,12 +43,16 @@ class PaperlessService {
 
   initialize() {
     if (!this.client && config.paperless.apiUrl && config.paperless.apiToken) {
+      const baseUrl = stripTrailingSlashes(config.paperless.apiUrl);
       this.client = axios.create({
-        baseURL: config.paperless.apiUrl.replace(/\/+$/, '') + '/api',
+        baseURL: baseUrl + '/api',
         headers: {
-          'Authorization': `Token ${config.paperless.apiToken}`,
-          'Content-Type': 'application/json'
-        }
+          Authorization: `Token ${config.paperless.apiToken}`,
+          'Content-Type': 'application/json',
+        },
+        // Requests carry the Paperless API token, so redirects must not leave
+        // the configured host.
+        beforeRedirect: createRedirectGuard(() => baseUrl),
       });
     }
   }
@@ -59,11 +68,11 @@ class PaperlessService {
         return null;
       }
 
-      let basePath = parsedUrl.pathname.replace(/\/+$/, '');
+      let basePath = stripTrailingSlashes(parsedUrl.pathname);
       basePath = basePath.replace(/\/api$/, '');
 
       return `${parsedUrl.origin}${basePath}`;
-    } catch (_) {
+    } catch {
       return null;
     }
   }
@@ -79,7 +88,7 @@ class PaperlessService {
       'external_url',
       'app_url',
       'base_url',
-      'paperless_url'
+      'paperless_url',
     ]);
 
     const pending = [settingsPayload];
@@ -96,7 +105,10 @@ class PaperlessService {
       visited.add(current);
 
       for (const [key, value] of Object.entries(current)) {
-        if (preferredKeys.has(String(key).toLowerCase()) && typeof value === 'string') {
+        if (
+          preferredKeys.has(String(key).toLowerCase()) &&
+          typeof value === 'string'
+        ) {
           const normalized = this._normalizePublicBaseUrl(value);
           if (normalized) {
             return normalized;
@@ -122,12 +134,16 @@ class PaperlessService {
     for (const endpoint of discoveryEndpoints) {
       try {
         const response = await this.client.get(endpoint);
-        const discoveredUrl = this._extractPublicBaseUrlCandidate(response?.data);
+        const discoveredUrl = this._extractPublicBaseUrlCandidate(
+          response?.data
+        );
         if (discoveredUrl) {
           return discoveredUrl;
         }
       } catch (error) {
-        console.debug(`[DEBUG] public URL discovery failed on ${endpoint}: ${error.message}`);
+        console.debug(
+          `[DEBUG] public URL discovery failed on ${endpoint}: ${error.message}`
+        );
       }
     }
 
@@ -148,16 +164,22 @@ class PaperlessService {
     const { forceRefresh = false } = options;
     const now = Date.now();
 
-    if (!forceRefresh && this._publicBaseUrlCache.value && now < this._publicBaseUrlCache.expiresAt) {
+    if (
+      !forceRefresh &&
+      this._publicBaseUrlCache.value &&
+      now < this._publicBaseUrlCache.expiresAt
+    ) {
       return {
         url: this._publicBaseUrlCache.value,
-        source: this._publicBaseUrlCache.source || 'api_url_fallback'
+        source: this._publicBaseUrlCache.source || 'api_url_fallback',
       };
     }
 
-    const manualOverrideUrl = this._normalizePublicBaseUrl(process.env.PAPERLESS_PUBLIC_URL || '');
+    const manualOverrideUrl = this._normalizePublicBaseUrl(
+      process.env.PAPERLESS_PUBLIC_URL || ''
+    );
 
-    let resolvedPublicUrl = '';
+    let resolvedPublicUrl;
     let source = 'unavailable';
 
     if (manualOverrideUrl) {
@@ -178,12 +200,12 @@ class PaperlessService {
     this._publicBaseUrlCache = {
       value: resolvedPublicUrl,
       source,
-      expiresAt: now + this._publicBaseUrlCacheTtlMs
+      expiresAt: now + this._publicBaseUrlCacheTtlMs,
     };
 
     return {
       url: resolvedPublicUrl,
-      source
+      source,
     };
   }
 
@@ -195,7 +217,7 @@ class PaperlessService {
   /**
    * Safely extract relative path from a pagination URL, validating against the base URL.
    * This prevents SSRF attacks by ensuring the URL origin matches the expected base.
-   * 
+   *
    * @param {string} nextUrl - The next URL from API response
    * @returns {string|null} The relative path if valid, null otherwise
    */
@@ -204,7 +226,10 @@ class PaperlessService {
       return null;
     }
 
-    const validation = validateUrlAgainstBase(nextUrl, this.client.defaults.baseURL);
+    const validation = validateUrlAgainstBase(
+      nextUrl,
+      this.client.defaults.baseURL
+    );
     if (!validation.valid) {
       console.error(`[ERROR] URL validation failed: ${validation.error}`);
       return null;
@@ -215,19 +240,26 @@ class PaperlessService {
 
   async getThumbnailImage(documentId) {
     this.initialize();
-    try { 
-      const response = await this.client.get(`/documents/${documentId}/thumb/`, {
-        responseType: 'arraybuffer'
-      });
+    try {
+      const response = await this.client.get(
+        `/documents/${documentId}/thumb/`,
+        {
+          responseType: 'arraybuffer',
+        }
+      );
 
-      if (response.data && response.data.byteLength > 0) {      
+      if (response.data && response.data.byteLength > 0) {
         return Buffer.from(response.data);
       }
-      
+
       console.warn(`[DEBUG] No thumbnail data for document ${documentId}`);
       return null;
     } catch (error) {
-      console.error(`[ERROR] fetching thumbnail for document ${documentId}:`, error.message);
+      console.error(
+        '[ERROR] fetching thumbnail for document %s:',
+        documentId,
+        error.message
+      );
       if (error.response) {
         console.log('[ERROR] status:', error.response.status);
         console.log('[ERROR] headers:', error.response.headers);
@@ -235,7 +267,6 @@ class PaperlessService {
       return null; // Behalten Sie das return null bei, damit der Prozess weiterlaufen kann
     }
   }
-
 
   // Aktualisiert den Tag-Cache, wenn er älter als CACHE_LIFETIME ist
   async ensureTagCache() {
@@ -245,8 +276,12 @@ class PaperlessService {
       if (this._refreshPromise) {
         return this._refreshPromise;
       }
-      const expireTime = new Date(this.lastTagRefresh + this.CACHE_LIFETIME).toISOString();
-      console.log(`[DEBUG] Tag cache expired (age: ${Math.floor(cacheAge / 1000)}s, TTL: ${Math.floor(this.CACHE_LIFETIME / 1000)}s, expired at: ${expireTime})`);
+      const expireTime = new Date(
+        this.lastTagRefresh + this.CACHE_LIFETIME
+      ).toISOString();
+      console.log(
+        `[DEBUG] Tag cache expired (age: ${Math.floor(cacheAge / 1000)}s, TTL: ${Math.floor(this.CACHE_LIFETIME / 1000)}s, expired at: ${expireTime})`
+      );
       // No race condition: synchronous code is never preempted in Node.js's
       // event loop, so no other call can reach here between the check above
       // and the assignment below.
@@ -270,56 +305,66 @@ class PaperlessService {
 
   // Lädt alle existierenden Tags
   async refreshTagCache() {
-      try {
-        console.log('[DEBUG] Refreshing tag cache...');
-        this.tagCache.clear();
-        let nextUrl = '/tags/';
-        while (nextUrl) {
-          const response = await this.client.get(nextUrl);
+    try {
+      console.log('[DEBUG] Refreshing tag cache...');
+      this.tagCache.clear();
+      let nextUrl = '/tags/';
+      while (nextUrl) {
+        const response = await this.client.get(nextUrl);
 
-          // Validate response structure
-          if (!response?.data?.results) {
-            console.error('[ERROR] Invalid response structure from API:', response?.data);
-            break;
-          }
-
-          response.data.results.forEach(tag => {
-            this.tagCache.set(tag.name.toLowerCase(), tag);
-          });
-
-          // Safely extract relative path from next URL to prevent SSRF
-          if (response.data.next) {
-            nextUrl = this._safeExtractRelativePath(response.data.next);
-            if (nextUrl) {
-              console.log('[DEBUG] Next page URL:', nextUrl);
-            }
-          } else {
-            nextUrl = null;
-          }
+        // Validate response structure
+        if (!response?.data?.results) {
+          console.error(
+            '[ERROR] Invalid response structure from API:',
+            response?.data
+          );
+          break;
         }
-        this.lastTagRefresh = Date.now();
-        console.log(`[DEBUG] Tag cache refreshed. Found ${this.tagCache.size} tags.`);
-      } catch (error) {
-        console.error('[ERROR] refreshing tag cache:', error.message);
-        throw error;
+
+        response.data.results.forEach((tag) => {
+          this.tagCache.set(tag.name.toLowerCase(), tag);
+        });
+
+        // Safely extract relative path from next URL to prevent SSRF
+        if (response.data.next) {
+          nextUrl = this._safeExtractRelativePath(response.data.next);
+          if (nextUrl) {
+            console.log('[DEBUG] Next page URL:', nextUrl);
+          }
+        } else {
+          nextUrl = null;
+        }
       }
+      this.lastTagRefresh = Date.now();
+      console.log(
+        `[DEBUG] Tag cache refreshed. Found ${this.tagCache.size} tags.`
+      );
+    } catch (error) {
+      console.error('[ERROR] refreshing tag cache:', error.message);
+      throw error;
     }
+  }
 
   async initializeWithCredentials(apiUrl, apiToken) {
+    const baseUrl = stripTrailingSlashes(apiUrl);
     this.client = axios.create({
-      baseURL: apiUrl.replace(/\/+$/, '') + '/api',
+      baseURL: baseUrl + '/api',
       headers: {
-        'Authorization': `Token ${apiToken}`,
-        'Content-Type': 'application/json'
-      }
+        Authorization: `Token ${apiToken}`,
+        'Content-Type': 'application/json',
+      },
+      beforeRedirect: createRedirectGuard(() => baseUrl),
     });
-    
+
     // Test the connection
     try {
       await this.client.get('/');
       return true;
     } catch (error) {
-      console.error('[ERROR] Failed to initialize with credentials:', error.message);
+      console.error(
+        '[ERROR] Failed to initialize with credentials:',
+        error.message
+      );
       this.client = null;
       return false;
     }
@@ -328,18 +373,20 @@ class PaperlessService {
   async createCustomFieldSafely(fieldName, fieldType, default_currency) {
     try {
       // Try to create the field first
-      const response = await this.client.post('/custom_fields/', { 
+      const response = await this.client.post('/custom_fields/', {
         name: fieldName,
         data_type: fieldType,
         extra_data: {
-          default_currency: default_currency || null
-        }
+          default_currency: default_currency || null,
+        },
       });
       const newField = response.data;
-      console.log(`[DEBUG] Successfully created custom field "${fieldName}" with ID ${newField.id}`);
+      console.log(
+        `[DEBUG] Successfully created custom field "${fieldName}" with ID ${newField.id}`
+      );
       this.customFieldCache.set(fieldName.toLowerCase(), newField);
       return newField;
-    } catch (error) { 
+    } catch (error) {
       if (error.response?.status === 400) {
         await this.refreshCustomFieldCache();
         const existingField = await this.findExistingCustomField(fieldName);
@@ -354,87 +401,104 @@ class PaperlessService {
   async getExistingCustomFields(documentId) {
     try {
       const response = await this.client.get(`/documents/${documentId}/`);
-      console.log('[DEBUG] Document response custom fields:', response.data.custom_fields);
+      console.log(
+        '[DEBUG] Document response custom fields:',
+        response.data.custom_fields
+      );
       return response.data.custom_fields || [];
     } catch (error) {
-      console.error(`[ERROR] fetching document ${documentId}:`, error.message);
+      console.error('[ERROR] fetching document %s:', documentId, error.message);
       return [];
     }
   }
-  
+
   async findExistingCustomField(fieldName) {
     const normalizedName = fieldName.toLowerCase();
-    
+
     const cachedField = this.customFieldCache.get(normalizedName);
     if (cachedField) {
-      console.log(`[DEBUG] Found custom field "${fieldName}" in cache with ID ${cachedField.id}`);
+      console.log(
+        `[DEBUG] Found custom field "${fieldName}" in cache with ID ${cachedField.id}`
+      );
       return cachedField;
     }
 
     try {
       const response = await this.client.get('/custom_fields/', {
         params: {
-          name__iexact: normalizedName  // Case-insensitive exact match
-        }
+          name__iexact: normalizedName, // Case-insensitive exact match
+        },
       });
 
       if (response.data.results.length > 0) {
         const foundField = response.data.results[0];
-        console.log(`[DEBUG] Found existing custom field "${fieldName}" via API with ID ${foundField.id}`);
+        console.log(
+          `[DEBUG] Found existing custom field "${fieldName}" via API with ID ${foundField.id}`
+        );
         this.customFieldCache.set(normalizedName, foundField);
         return foundField;
       }
     } catch (error) {
-      console.warn(`[ERROR] searching for custom field "${fieldName}":`, error.message);
+      console.warn(
+        '[ERROR] searching for custom field "%s":',
+        fieldName,
+        error.message
+      );
     }
 
     return null;
   }
 
   async refreshCustomFieldCache() {
-      try {
-        console.log('[DEBUG] Refreshing custom field cache...');
-        this.customFieldCache.clear();
-        let nextUrl = '/custom_fields/';
-        while (nextUrl) {
-          const response = await this.client.get(nextUrl);
+    try {
+      console.log('[DEBUG] Refreshing custom field cache...');
+      this.customFieldCache.clear();
+      let nextUrl = '/custom_fields/';
+      while (nextUrl) {
+        const response = await this.client.get(nextUrl);
 
-          // Validate response structure
-          if (!response?.data?.results) {
-            console.error('[ERROR] Invalid response structure from API:', response?.data);
-            break;
-          }
-
-          response.data.results.forEach(field => {
-            this.customFieldCache.set(field.name.toLowerCase(), field);
-          });
-
-          // Safely extract relative path from next URL to prevent SSRF
-          if (response.data.next) {
-            nextUrl = this._safeExtractRelativePath(response.data.next);
-            if (nextUrl) {
-              console.log('[DEBUG] Next page URL:', nextUrl);
-            }
-          } else {
-            nextUrl = null;
-          }
+        // Validate response structure
+        if (!response?.data?.results) {
+          console.error(
+            '[ERROR] Invalid response structure from API:',
+            response?.data
+          );
+          break;
         }
-        this.lastCustomFieldRefresh = Date.now();
-        console.log(`[DEBUG] Custom field cache refreshed. Found ${this.customFieldCache.size} fields.`);
-      } catch (error) {
-        console.error('[ERROR] refreshing custom field cache:', error.message);
-        throw error;
-      }
-    }
 
+        response.data.results.forEach((field) => {
+          this.customFieldCache.set(field.name.toLowerCase(), field);
+        });
+
+        // Safely extract relative path from next URL to prevent SSRF
+        if (response.data.next) {
+          nextUrl = this._safeExtractRelativePath(response.data.next);
+          if (nextUrl) {
+            console.log('[DEBUG] Next page URL:', nextUrl);
+          }
+        } else {
+          nextUrl = null;
+        }
+      }
+      this.lastCustomFieldRefresh = Date.now();
+      console.log(
+        `[DEBUG] Custom field cache refreshed. Found ${this.customFieldCache.size} fields.`
+      );
+    } catch (error) {
+      console.error('[ERROR] refreshing custom field cache:', error.message);
+      throw error;
+    }
+  }
 
   async findExistingTag(tagName) {
     const normalizedName = tagName.toLowerCase();
-    
+
     // 1. Zuerst im Cache suchen
     const cachedTag = this.tagCache.get(normalizedName);
     if (cachedTag) {
-      console.log(`[DEBUG] Found tag "${tagName}" in cache with ID ${cachedTag.id}`);
+      console.log(
+        `[DEBUG] Found tag "${tagName}" in cache with ID ${cachedTag.id}`
+      );
       return cachedTag;
     }
 
@@ -442,18 +506,20 @@ class PaperlessService {
     try {
       const response = await this.client.get('/tags/', {
         params: {
-          name__iexact: normalizedName  // Case-insensitive exact match
-        }
+          name__iexact: normalizedName, // Case-insensitive exact match
+        },
       });
 
       if (response.data.results.length > 0) {
         const foundTag = response.data.results[0];
-        console.log(`[DEBUG] Found existing tag "${tagName}" via API with ID ${foundTag.id}`);
+        console.log(
+          `[DEBUG] Found existing tag "${tagName}" via API with ID ${foundTag.id}`
+        );
         this.tagCache.set(normalizedName, foundTag);
         return foundTag;
       }
     } catch (error) {
-      console.warn(`[ERROR] searching for tag "${tagName}":`, error.message);
+      console.warn('[ERROR] searching for tag "%s":', tagName, error.message);
     }
 
     return null;
@@ -461,12 +527,14 @@ class PaperlessService {
 
   async createTagSafely(tagName) {
     const normalizedName = tagName.toLowerCase();
-    
+
     try {
       // Versuche zuerst, den Tag zu erstellen
       const response = await this.client.post('/tags/', { name: tagName });
       const newTag = response.data;
-      console.log(`[DEBUG] Successfully created tag "${tagName}" with ID ${newTag.id}`);
+      console.log(
+        `[DEBUG] Successfully created tag "${tagName}" with ID ${newTag.id}`
+      );
       this.tagCache.set(normalizedName, newTag);
       // Invalidate cache after creating new tag to ensure consistency
       this.lastTagRefresh = 0;
@@ -476,7 +544,7 @@ class PaperlessService {
         // Bei einem 400er Fehler könnte der Tag bereits existieren
         // Aktualisiere den Cache und suche erneut
         await this.refreshTagCache();
-        
+
         // Suche nochmal nach dem Tag
         const existingTag = await this.findExistingTag(tagName);
         if (existingTag) {
@@ -491,13 +559,14 @@ class PaperlessService {
     try {
       this.initialize();
       await this.ensureTagCache();
-      
+
       // Check if we should restrict to existing tags
       // Explicitly check options first, then env var
-      const restrictToExistingTags = options.restrictToExistingTags === true || 
-                                   (options.restrictToExistingTags === undefined && 
-                                    process.env.RESTRICT_TO_EXISTING_TAGS === 'yes');
-      
+      const restrictToExistingTags =
+        options.restrictToExistingTags === true ||
+        (options.restrictToExistingTags === undefined &&
+          process.env.RESTRICT_TO_EXISTING_TAGS === 'yes');
+
       // Input validation
       if (!tagNames) {
         console.warn('[DEBUG] No tags provided to processTags');
@@ -505,23 +574,26 @@ class PaperlessService {
       }
 
       // Convert to array if string is passed
-      const tagsArray = typeof tagNames === 'string' 
-        ? [tagNames]
-        : Array.isArray(tagNames) 
-          ? tagNames 
-          : [];
+      const tagsArray =
+        typeof tagNames === 'string'
+          ? [tagNames]
+          : Array.isArray(tagNames)
+            ? tagNames
+            : [];
 
       if (tagsArray.length === 0) {
         console.warn('[DEBUG] No valid tags to process');
         return { tagIds: [], errors: [] };
       }
-  
+
       const tagIds = [];
       const errors = [];
       const processedTags = new Set(); // Prevent duplicates
-      
-      console.log(`[DEBUG] Processing tags with restrictToExistingTags=${restrictToExistingTags}`);
-  
+
+      console.log(
+        `[DEBUG] Processing tags with restrictToExistingTags=${restrictToExistingTags}`
+      );
+
       // Process regular tags
       for (const tagName of tagsArray) {
         if (!tagName || typeof tagName !== 'string') {
@@ -529,64 +601,79 @@ class PaperlessService {
           errors.push({ tagName, error: 'Invalid tag name' });
           continue;
         }
-  
+
         const normalizedName = tagName.toLowerCase().trim();
-        
+
         // Skip empty or already processed tags
         if (!normalizedName || processedTags.has(normalizedName)) {
           continue;
         }
-  
+
         try {
           // Search for existing tag first
           let tag = await this.findExistingTag(tagName);
-          
+
           // If no existing tag found and restrictions are not enabled, create new one
           if (!tag && !restrictToExistingTags) {
             tag = await this.createTagSafely(tagName);
           } else if (!tag && restrictToExistingTags) {
-            console.log(`[DEBUG] Tag "${tagName}" does not exist and restrictions are enabled, skipping`);
-            errors.push({ tagName, error: 'Tag does not exist and restrictions are enabled' });
+            console.log(
+              `[DEBUG] Tag "${tagName}" does not exist and restrictions are enabled, skipping`
+            );
+            errors.push({
+              tagName,
+              error: 'Tag does not exist and restrictions are enabled',
+            });
             continue;
           }
-  
+
           if (tag && tag.id) {
             tagIds.push(tag.id);
             processedTags.add(normalizedName);
           }
-  
         } catch (error) {
-          console.error(`[ERROR] processing tag "${tagName}":`, error.message);
+          console.error('[ERROR] processing tag "%s":', tagName, error.message);
           errors.push({ tagName, error: error.message });
         }
       }
-  
+
       // Add AI-Processed tag if enabled
-      if (process.env.ADD_AI_PROCESSED_TAG === 'yes' && process.env.AI_PROCESSED_TAG_NAME) {
+      if (
+        process.env.ADD_AI_PROCESSED_TAG === 'yes' &&
+        process.env.AI_PROCESSED_TAG_NAME
+      ) {
         try {
           const aiTagName = process.env.AI_PROCESSED_TAG_NAME;
           let aiTag = await this.findExistingTag(aiTagName);
-          
+
           if (!aiTag) {
             aiTag = await this.createTagSafely(aiTagName);
           }
-  
+
           if (aiTag && aiTag.id) {
             tagIds.push(aiTag.id);
           }
         } catch (error) {
-          console.error(`[ERROR] processing AI tag "${process.env.AI_PROCESSED_TAG_NAME}":`, error.message);
-          errors.push({ tagName: process.env.AI_PROCESSED_TAG_NAME, error: error.message });
+          console.error(
+            `[ERROR] processing AI tag "${process.env.AI_PROCESSED_TAG_NAME}":`,
+            error.message
+          );
+          errors.push({
+            tagName: process.env.AI_PROCESSED_TAG_NAME,
+            error: error.message,
+          });
         }
       }
-  
-      return { 
+
+      return {
         tagIds: [...new Set(tagIds)], // Remove any duplicates
-        errors 
-      };      
+        errors,
+      };
     } catch (error) {
       console.error('[ERROR] in processTags:', error);
-      throw new Error(`[ERROR] Failed to process tags: ${error.message}`);
+      throw new Error(`[ERROR] Failed to process tags: ${error.message}`, {
+        cause: error,
+      });
     }
   }
 
@@ -622,12 +709,12 @@ class PaperlessService {
       try {
         const params = {
           page,
-          page_size: 100,  // Maximale Seitengröße für effizientes Laden
-          ordering: 'name'  // Optional: Sortierung nach Namen
+          page_size: 100, // Maximale Seitengröße für effizientes Laden
+          ordering: 'name', // Optional: Sortierung nach Namen
         };
 
         const response = await this.client.get('/tags/', { params });
-        
+
         if (!response?.data?.results || !Array.isArray(response.data.results)) {
           console.error(`[DEBUG] Invalid API response on page ${page}`);
           break;
@@ -638,13 +725,12 @@ class PaperlessService {
         page++;
 
         console.log(
-          `[DEBUG] Fetched page ${page-1}, got ${response.data.results.length} tags. ` +
-          `[DEBUG] Total so far: ${tags.length}`
+          `[DEBUG] Fetched page ${page - 1}, got ${response.data.results.length} tags. ` +
+            `[DEBUG] Total so far: ${tags.length}`
         );
 
         // Kleine Verzögerung um die API nicht zu überlasten
-        await new Promise(resolve => setTimeout(resolve, 100));
-
+        await new Promise((resolve) => setTimeout(resolve, 100));
       } catch (error) {
         console.error(`[ERRRO] fetching tags page ${page}:`, error.message);
         if (error.response) {
@@ -662,7 +748,7 @@ class PaperlessService {
     this.initialize();
     try {
       const response = await this.client.get('/tags/', {
-        params: { count: true }
+        params: { count: true },
       });
       return response.data.count;
     } catch (error) {
@@ -675,7 +761,7 @@ class PaperlessService {
     this.initialize();
     try {
       const response = await this.client.get('/correspondents/', {
-        params: { count: true }
+        params: { count: true },
       });
       return response.data.count;
     } catch (error) {
@@ -688,7 +774,7 @@ class PaperlessService {
     this.initialize();
     try {
       const response = await this.client.get('/documents/', {
-        params: { count: true }
+        params: { count: true },
       });
       return response.data.count;
     } catch (error) {
@@ -703,8 +789,8 @@ class PaperlessService {
       const response = await this.client.get('/documents/', {
         params: {
           count: true,
-          ...params
-        }
+          ...params,
+        },
       });
 
       return Number(response?.data?.count || 0);
@@ -719,40 +805,39 @@ class PaperlessService {
     let allCorrespondents = [];
     let page = 1;
     let hasNextPage = true;
-  
+
     try {
       while (hasNextPage) {
         const response = await this.client.get('/correspondents/', {
           params: {
             fields: 'id,name',
             count: true,
-            page: page
-          }
+            page: page,
+          },
         });
-  
+
         const { results, next } = response.data;
-        
+
         // Füge die Ergebnisse der aktuellen Seite hinzu
         allCorrespondents = allCorrespondents.concat(
-          results.map(correspondent => ({
+          results.map((correspondent) => ({
             name: correspondent.name,
             id: correspondent.id,
-            document_count: correspondent.document_count
+            document_count: correspondent.document_count,
           }))
         );
-  
+
         // Prüfe, ob es eine nächste Seite gibt
         hasNextPage = next !== null;
         page++;
-  
+
         // Optional: Füge eine kleine Verzögerung hinzu, um die API nicht zu überlasten
         if (hasNextPage) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
       }
-  
+
       return allCorrespondents;
-  
     } catch (error) {
       console.error('[ERROR] fetching correspondent names:', error.message);
       return [];
@@ -764,36 +849,35 @@ class PaperlessService {
     let allDocumentTypes = [];
     let page = 1;
     let hasNextPage = true;
-  
+
     try {
       while (hasNextPage) {
         const response = await this.client.get('/document_types/', {
           params: {
             fields: 'id,name',
             count: true,
-            page: page
-          }
+            page: page,
+          },
         });
-  
+
         const { results, next } = response.data;
-        
+
         allDocumentTypes = allDocumentTypes.concat(
-          results.map(docType => ({
+          results.map((docType) => ({
             name: docType.name,
-            id: docType.id
+            id: docType.id,
           }))
         );
-  
+
         hasNextPage = next !== null;
         page++;
-  
+
         if (hasNextPage) {
-          await new Promise(resolve => setTimeout(resolve, 100));
+          await new Promise((resolve) => setTimeout(resolve, 100));
         }
       }
-  
+
       return allDocumentTypes;
-  
     } catch (error) {
       console.error('[ERROR] fetching document type names:', error.message);
       return [];
@@ -805,7 +889,7 @@ class PaperlessService {
     let allTags = [];
     let currentPage = 1;
     let hasMorePages = true;
-  
+
     try {
       while (hasMorePages) {
         const response = await this.client.get('/tags/', {
@@ -813,23 +897,23 @@ class PaperlessService {
             fields: 'name',
             count: true,
             page: currentPage,
-            page_size: 100 // Sie können die Seitengröße nach Bedarf anpassen
-          }
+            page_size: 100, // Sie können die Seitengröße nach Bedarf anpassen
+          },
         });
-  
+
         // Füge die Tags dieser Seite zum Gesamtergebnis hinzu
         allTags = allTags.concat(
-          response.data.results.map(tag => ({
+          response.data.results.map((tag) => ({
             name: tag.name,
-            document_count: tag.document_count
+            document_count: tag.document_count,
           }))
         );
-  
+
         // Prüfe, ob es weitere Seiten gibt
         hasMorePages = response.data.next !== null;
         currentPage++;
       }
-  
+
       return allTags;
     } catch (error) {
       console.error('[DEBUG] Error fetching tag names:', error.message);
@@ -840,10 +924,17 @@ class PaperlessService {
   parseTagList(value) {
     if (!value) return [];
     if (Array.isArray(value)) {
-      return [...new Set(value.map(tag => `${tag}`.trim()).filter(Boolean))];
+      return [...new Set(value.map((tag) => `${tag}`.trim()).filter(Boolean))];
     }
     if (typeof value === 'string') {
-      return [...new Set(value.split(',').map(tag => tag.trim()).filter(Boolean))];
+      return [
+        ...new Set(
+          value
+            .split(',')
+            .map((tag) => tag.trim())
+            .filter(Boolean)
+        ),
+      ];
     }
     return [];
   }
@@ -868,23 +959,33 @@ class PaperlessService {
   }
 
   filterDocumentsByExcludedTagIds(documents, excludedTagIds) {
-    if (!Array.isArray(documents) || documents.length === 0 || excludedTagIds.length === 0) {
+    if (
+      !Array.isArray(documents) ||
+      documents.length === 0 ||
+      excludedTagIds.length === 0
+    ) {
       return documents;
     }
 
-    const excludedTagSet = new Set(excludedTagIds.map(id => Number(id)).filter(Number.isInteger));
+    const excludedTagSet = new Set(
+      excludedTagIds.map((id) => Number(id)).filter(Number.isInteger)
+    );
     if (excludedTagSet.size === 0) {
       return documents;
     }
 
-    return documents.filter(document => {
+    return documents.filter((document) => {
       if (!Array.isArray(document.tags) || document.tags.length === 0) {
         return true;
       }
 
-      const hasExcludedTag = document.tags.some(tag => {
-        const normalizedTagId = typeof tag === 'object' ? Number(tag?.id) : Number(tag);
-        return Number.isInteger(normalizedTagId) && excludedTagSet.has(normalizedTagId);
+      const hasExcludedTag = document.tags.some((tag) => {
+        const normalizedTagId =
+          typeof tag === 'object' ? Number(tag?.id) : Number(tag);
+        return (
+          Number.isInteger(normalizedTagId) &&
+          excludedTagSet.has(normalizedTagId)
+        );
       });
 
       return !hasExcludedTag;
@@ -907,16 +1008,23 @@ class PaperlessService {
     let documents = [];
     let page = 1;
     let hasMore = true;
-    const shouldFilterByTags = applyFilters && process.env.PROCESS_PREDEFINED_DOCUMENTS === 'yes';
-    const includeTagNames = applyFilters ? this.parseTagList(process.env.TAGS) : [];
-    const excludeTagNames = applyFilters ? this.parseTagList(process.env.IGNORE_TAGS) : [];
+    const shouldFilterByTags =
+      applyFilters && process.env.PROCESS_PREDEFINED_DOCUMENTS === 'yes';
+    const includeTagNames = applyFilters
+      ? this.parseTagList(process.env.TAGS)
+      : [];
+    const excludeTagNames = applyFilters
+      ? this.parseTagList(process.env.IGNORE_TAGS)
+      : [];
     let includeTagIds = [];
     let excludeTagIds = [];
 
     // Vorverarbeitung der Include-Tags, wenn Filter aktiv ist
     if (shouldFilterByTags) {
       if (includeTagNames.length === 0) {
-        console.warn('[DEBUG] PROCESS_PREDEFINED_DOCUMENTS is set to yes but no TAGS are defined');
+        console.warn(
+          '[DEBUG] PROCESS_PREDEFINED_DOCUMENTS is set to yes but no TAGS are defined'
+        );
         return [];
       }
 
@@ -927,13 +1035,18 @@ class PaperlessService {
         return [];
       }
 
-      console.log('[DEBUG] Filtering documents for include tag IDs:', includeTagIds);
+      console.log(
+        '[DEBUG] Filtering documents for include tag IDs:',
+        includeTagIds
+      );
     }
 
     if (excludeTagNames.length > 0) {
       excludeTagIds = await this.resolveTagIdsByName(excludeTagNames);
       if (excludeTagIds.length === 0) {
-        console.warn('[DEBUG] IGNORE_TAGS configured but no matching tags were found');
+        console.warn(
+          '[DEBUG] IGNORE_TAGS configured but no matching tags were found'
+        );
       } else {
         console.log('[DEBUG] Excluding documents with tag IDs:', excludeTagIds);
       }
@@ -944,8 +1057,10 @@ class PaperlessService {
         const params = {
           page,
           page_size: 100,
-          fields: options.fields || 'id,title,created,created_date,added,tags,correspondent',
-          ordering: 'id'
+          fields:
+            options.fields ||
+            'id,title,created,created_date,added,tags,correspondent',
+          ordering: 'id',
         };
 
         // Füge Tag-Filter hinzu, wenn Tags definiert sind
@@ -954,7 +1069,7 @@ class PaperlessService {
         }
 
         const response = await this.client.get('/documents/', { params });
-        
+
         if (!response?.data?.results || !Array.isArray(response.data.results)) {
           console.error(`[DEBUG] Invalid API response on page ${page}`);
           break;
@@ -965,15 +1080,17 @@ class PaperlessService {
         page++;
 
         console.log(
-          `[DEBUG] Fetched page ${page-1}, got ${response.data.results.length} documents. ` +
-          `[DEBUG] Total so far: ${documents.length}`
+          `[DEBUG] Fetched page ${page - 1}, got ${response.data.results.length} documents. ` +
+            `[DEBUG] Total so far: ${documents.length}`
         );
 
         // Kleine Verzögerung um die API nicht zu überlasten
-        await new Promise(resolve => setTimeout(resolve, 100));
-
+        await new Promise((resolve) => setTimeout(resolve, 100));
       } catch (error) {
-        console.error(`[ERROR]  fetching documents page ${page}:`, error.message);
+        console.error(
+          `[ERROR]  fetching documents page ${page}:`,
+          error.message
+        );
         if (error.response) {
           console.error('[ERROR] Response status:', error.response.status);
         }
@@ -981,26 +1098,32 @@ class PaperlessService {
       }
     }
 
-    const filteredDocuments = this.filterDocumentsByExcludedTagIds(documents, excludeTagIds);
+    const filteredDocuments = this.filterDocumentsByExcludedTagIds(
+      documents,
+      excludeTagIds
+    );
     if (excludeTagIds.length > 0) {
       console.log(
         `[DEBUG] Exclude filter removed ${documents.length - filteredDocuments.length} documents. ` +
-        `[DEBUG] Remaining: ${filteredDocuments.length}`
+          `[DEBUG] Remaining: ${filteredDocuments.length}`
       );
     }
 
-    console.log(`[DEBUG] Finished fetching. Found ${filteredDocuments.length} documents after filtering.`);
+    console.log(
+      `[DEBUG] Finished fetching. Found ${filteredDocuments.length} documents after filtering.`
+    );
     return filteredDocuments;
-}
+  }
 
   async getEffectiveDocumentCount() {
-    const shouldFilterByTags = process.env.PROCESS_PREDEFINED_DOCUMENTS === 'yes';
+    const shouldFilterByTags =
+      process.env.PROCESS_PREDEFINED_DOCUMENTS === 'yes';
     const includeTagNames = this.parseTagList(process.env.TAGS);
     const excludeTagNames = this.parseTagList(process.env.IGNORE_TAGS);
     const cacheKey = JSON.stringify({
       shouldFilterByTags,
       includeTagNames,
-      excludeTagNames
+      excludeTagNames,
     });
 
     if (
@@ -1041,7 +1164,7 @@ class PaperlessService {
         try {
           effectiveCount = await this.getDocumentCountByParams({
             ...baseCountParams,
-            tags__id__none: excludeTagIds.join(',')
+            tags__id__none: excludeTagIds.join(','),
           });
           this._supportsTagsIdNone = true;
         } catch (error) {
@@ -1057,7 +1180,9 @@ class PaperlessService {
         if (excludeTagIds.length === 0) {
           effectiveCount = await this.getDocumentCountByParams(baseCountParams);
         } else {
-          const processableDocuments = await this.getAllDocuments({ fields: 'id,tags' });
+          const processableDocuments = await this.getAllDocuments({
+            fields: 'id,tags',
+          });
           effectiveCount = processableDocuments.length;
         }
       }
@@ -1065,44 +1190,23 @@ class PaperlessService {
       this._effectiveCountCache = {
         key: cacheKey,
         count: effectiveCount,
-        expiresAt: Date.now() + this._effectiveCountCacheTtlMs
+        expiresAt: Date.now() + this._effectiveCountCacheTtlMs,
       };
 
       return effectiveCount;
     } catch (error) {
-      console.error('[ERROR] fetching effective document count:', error.message);
+      console.error(
+        '[ERROR] fetching effective document count:',
+        error.message
+      );
       return 0;
-    }
-  }
-
-  async getAllDocumentIds() {
-    /**
-     * Get all Document IDs from the Paperless API.
-     * 
-     * @returns    An array of all Document IDs.
-     * @throws     An error if the request fails.
-     * @note       This method is used to get all Document IDs for further processing.
-     */
-    this.initialize();
-    try {
-      const response = await this.client.get('/documents/', {
-        params: { 
-          page,
-          page_size: 100,
-          fields: 'id',
-        }
-      });
-      return response.data.results.map(doc => doc.id);
-    } catch (error) {
-      console.error('[ERROR] fetching document IDs:', error.message);
-      return [];
     }
   }
 
   async getAllDocumentIdsScan() {
     /**
      * Get all Document IDs from the Paperless API.
-     * 
+     *
      * @returns    An array of all Document IDs.
      * @throws     An error if the request fails.
      * @note       This method is used to get all Document IDs for further processing.
@@ -1116,32 +1220,35 @@ class PaperlessService {
     let documents = [];
     let page = 1;
     let hasMore = true;
-    const shouldFilterByTags = process.env.PROCESS_PREDEFINED_DOCUMENTS === 'yes';
+    const shouldFilterByTags =
+      process.env.PROCESS_PREDEFINED_DOCUMENTS === 'yes';
     let tagIds = [];
 
     // Vorverarbeitung der Tags, wenn Filter aktiv ist
     if (shouldFilterByTags) {
       if (!process.env.TAGS) {
-        console.warn('[DEBUG] PROCESS_PREDEFINED_DOCUMENTS is set to yes but no TAGS are defined');
+        console.warn(
+          '[DEBUG] PROCESS_PREDEFINED_DOCUMENTS is set to yes but no TAGS are defined'
+        );
         return [];
       }
-      
+
       // Hole die Tag-IDs für die definierten Tags
-      const tagNames = process.env.TAGS.split(',').map(tag => tag.trim());
+      const tagNames = process.env.TAGS.split(',').map((tag) => tag.trim());
       await this.ensureTagCache();
-      
+
       for (const tagName of tagNames) {
         const tag = await this.findExistingTag(tagName);
         if (tag) {
           tagIds.push(tag.id);
         }
       }
-      
+
       if (tagIds.length === 0) {
         console.warn('[DEBUG] None of the specified tags were found');
         return [];
       }
-      
+
       console.log('[DEBUG] Filtering documents for tag IDs:', tagIds);
     }
 
@@ -1151,11 +1258,11 @@ class PaperlessService {
           page,
           page_size: 100,
           fields: 'id',
-          ordering: 'id'
+          ordering: 'id',
         };
 
         const response = await this.client.get('/documents/', { params });
-        
+
         if (!response?.data?.results || !Array.isArray(response.data.results)) {
           console.error(`[ERROR] Invalid API response on page ${page}`);
           break;
@@ -1166,15 +1273,17 @@ class PaperlessService {
         page++;
 
         console.log(
-          `[DEBUG] Fetched page ${page-1}, got ${response.data.results.length} documents. ` +
-          `[DEBUG] Total so far: ${documents.length}`
+          `[DEBUG] Fetched page ${page - 1}, got ${response.data.results.length} documents. ` +
+            `[DEBUG] Total so far: ${documents.length}`
         );
 
         // Kleine Verzögerung um die API nicht zu überlasten
-        await new Promise(resolve => setTimeout(resolve, 100));
-
+        await new Promise((resolve) => setTimeout(resolve, 100));
       } catch (error) {
-        console.error(`[ERROR] fetching documents page ${page}:`, error.message);
+        console.error(
+          `[ERROR] fetching documents page ${page}:`,
+          error.message
+        );
         if (error.response) {
           console.error('[DEBUG] Response status:', error.response.status);
         }
@@ -1182,27 +1291,34 @@ class PaperlessService {
       }
     }
 
-    console.log(`[DEBUG] Finished fetching. Found ${documents.length} documents.`);
+    console.log(
+      `[DEBUG] Finished fetching. Found ${documents.length} documents.`
+    );
     return documents;
   }
 
   async getCorrespondentNameById(correspondentId) {
     /**
      * Get the Name of a Correspondent by its ID.
-     * 
+     *
      * @param   id  The id of the correspondent.
      * @returns    The name of the correspondent.
      */
     this.initialize();
     try {
-      const response = await this.client.get(`/correspondents/${correspondentId}/`);
+      const response = await this.client.get(
+        `/correspondents/${correspondentId}/`
+      );
       return response.data;
     } catch (error) {
-      console.error(`[ERROR] fetching correspondent ${correspondentId}:`, error.message);
+      console.error(
+        `[ERROR] fetching correspondent ${correspondentId}:`,
+        error.message
+      );
       return null;
     }
   }
-  
+
   async getTagNameById(tagId) {
     /**
      * Get the Name of a Tag by its ID.
@@ -1215,26 +1331,29 @@ class PaperlessService {
       const response = await this.client.get(`/tags/${tagId}/`);
       return response.data.name;
     } catch (error) {
-      console.error(`[ERROR] fetching tag name for ID ${tagId}:`, error.message);
+      console.error(
+        `[ERROR] fetching tag name for ID ${tagId}:`,
+        error.message
+      );
       return null;
     }
   }
 
-  async getDocumentsWithTitleTagsCorrespondentCreated () {
+  async getDocumentsWithTitleTagsCorrespondentCreated() {
     /**
      * Get all documents with metadata (title, tags, correspondent, created date).
-     * 
+     *
      * @returns    An array of documents with metadata.
      * @throws     An error if the request fails.
-     * @note       This method is used to get all documents with metadata for further processing 
+     * @note       This method is used to get all documents with metadata for further processing
      */
-    
+
     this.initialize();
     try {
       const response = await this.client.get('/documents/', {
         params: {
-          fields: 'id,title,tags,correspondent,created'
-        }
+          fields: 'id,title,tags,correspondent,created',
+        },
       });
       return response.data.results;
     } catch (error) {
@@ -1246,7 +1365,9 @@ class PaperlessService {
   async getRecentDocumentsWithMetadata(limit = 16) {
     this.initialize();
 
-    const safeLimit = Number.isInteger(Number(limit)) ? Math.max(1, Math.min(Number(limit), 100)) : 16;
+    const safeLimit = Number.isInteger(Number(limit))
+      ? Math.max(1, Math.min(Number(limit), 100))
+      : 16;
 
     try {
       const response = await this.client.get('/documents/', {
@@ -1254,8 +1375,8 @@ class PaperlessService {
           fields: 'id,title,tags,correspondent,created',
           page: 1,
           page_size: safeLimit,
-          ordering: '-created'
-        }
+          ordering: '-created',
+        },
       });
 
       if (!Array.isArray(response?.data?.results)) {
@@ -1264,7 +1385,10 @@ class PaperlessService {
 
       return response.data.results;
     } catch (error) {
-      console.error('[ERROR] fetching recent documents with metadata:', error.message);
+      console.error(
+        '[ERROR] fetching recent documents with metadata:',
+        error.message
+      );
       return [];
     }
   }
@@ -1286,7 +1410,7 @@ class PaperlessService {
       const response = await this.client.get(`/documents/${documentId}/`);
       return response.data;
     } catch (error) {
-      console.error(`[ERROR] fetching document ${documentId}:`, error.message);
+      console.error('[ERROR] fetching document %s:', documentId, error.message);
       throw error;
     }
   }
@@ -1294,259 +1418,324 @@ class PaperlessService {
   async searchForCorrespondentById(id) {
     try {
       const response = await this.client.get('/correspondents/', {
-          params: {
-              id: id
-          }
+        params: {
+          id: id,
+        },
       });
 
       const results = response.data.results;
-      
+
       if (results.length === 0) {
-          console.log(`[DEBUG] No correspondent with "${id}" found`);
-          return null;
+        console.log(`[DEBUG] No correspondent with "${id}" found`);
+        return null;
       }
-      
+
       if (results.length > 1) {
-          console.log(`[DEBUG] Multiple correspondents found:`);
-          results.forEach(c => {
-              console.log(`- ID: ${c.id}, Name: ${c.name}`);
-          });
-          return results;
+        console.log(`[DEBUG] Multiple correspondents found:`);
+        results.forEach((c) => {
+          console.log(`- ID: ${c.id}, Name: ${c.name}`);
+        });
+        return results;
       }
 
       // Genau ein Ergebnis gefunden
       return {
-          id: results[0].id,
-          name: results[0].name
+        id: results[0].id,
+        name: results[0].name,
       };
-
-  } catch (error) {
-      console.error('[ERROR] while seraching for existing correspondent:', error.message);
+    } catch (error) {
+      console.error(
+        '[ERROR] while seraching for existing correspondent:',
+        error.message
+      );
       throw error;
+    }
   }
-}
 
-async searchForExistingCorrespondent(correspondent) {
-  try {
+  async searchForExistingCorrespondent(correspondent) {
+    try {
       const response = await this.client.get('/correspondents/', {
-          params: {
-              name__icontains: correspondent
-          }
+        params: {
+          name__icontains: correspondent,
+        },
       });
 
       const results = response.data.results;
-      
+
       if (results.length === 0) {
-          console.log(`[DEBUG] No correspondent with name "${correspondent}" found`);
-          return null;
+        console.log(
+          `[DEBUG] No correspondent with name "${correspondent}" found`
+        );
+        return null;
       }
-      
+
       // Check for exact match in the results - thanks to @skius for the hint!
-      const exactMatch = results.find(c => c.name.toLowerCase() === correspondent.toLowerCase());
+      const exactMatch = results.find(
+        (c) => c.name.toLowerCase() === correspondent.toLowerCase()
+      );
       if (exactMatch) {
-          console.log(`[DEBUG] Found exact match for correspondent "${correspondent}" with ID ${exactMatch.id}`);
-          return {
-              id: exactMatch.id,
-              name: exactMatch.name
-          };
+        console.log(
+          `[DEBUG] Found exact match for correspondent "${correspondent}" with ID ${exactMatch.id}`
+        );
+        return {
+          id: exactMatch.id,
+          name: exactMatch.name,
+        };
       }
 
       // No exact match found, return null
       console.log(`[DEBUG] No exact match found for "${correspondent}"`);
       return null;
-
-  } catch (error) {
-      console.error('[ERROR] while searching for existing correspondent:', error.message);
+    } catch (error) {
+      console.error(
+        '[ERROR] while searching for existing correspondent:',
+        error.message
+      );
       throw error;
+    }
   }
-}
 
   async getOrCreateCorrespondent(name, options = {}) {
     this.initialize();
-    
+
     // Check if we should restrict to existing correspondents
     // Explicitly check options first, then env var
-    const restrictToExistingCorrespondents = options.restrictToExistingCorrespondents === true || 
-                                           (options.restrictToExistingCorrespondents === undefined && 
-                                            process.env.RESTRICT_TO_EXISTING_CORRESPONDENTS === 'yes');
-    
-    console.log(`[DEBUG] Processing correspondent with restrictToExistingCorrespondents=${restrictToExistingCorrespondents}`);
-  
-    try {
-        // Search for the correspondent
-        const existingCorrespondent = await this.searchForExistingCorrespondent(name);
-        console.log("[DEBUG] Response Correspondent Search: ", existingCorrespondent);
-    
-        if (existingCorrespondent) {
-            console.log(`[DEBUG] Found existing correspondent "${name}" with ID ${existingCorrespondent.id}`);
-            return existingCorrespondent;
-        }
-        
-        // If we're restricting to existing correspondents and none was found, return null
-        if (restrictToExistingCorrespondents) {
-            console.log(`[DEBUG] Correspondent "${name}" does not exist and restrictions are enabled, returning null`);
-            return null;
-        }
-    
-        // Create new correspondent only if restrictions are not enabled
-        try {
-            const createResponse = await this.client.post('/correspondents/', { 
-                name: name 
-            });
-            console.log(`[DEBUG] Created new correspondent "${name}" with ID ${createResponse.data.id}`);
-            return createResponse.data;
-        } catch (createError) {
-            if (createError.response?.status === 400 && 
-                createError.response?.data?.error?.includes('unique constraint')) {
-              
-                // Race condition check - another process might have created it
-                const retryResponse = await this.client.get('/correspondents/', {
-                    params: { name: name }
-                });
-              
-                const justCreatedCorrespondent = retryResponse.data.results.find(
-                    c => c.name.toLowerCase() === name.toLowerCase()
-                );
-              
-                if (justCreatedCorrespondent) {
-                    console.log(`[DEBUG] Retrieved correspondent "${name}" after constraint error with ID ${justCreatedCorrespondent.id}`);
-                    return justCreatedCorrespondent;
-                }
-            }
-            throw createError;
-        }
-    } catch (error) {
-        console.error(`[ERROR] Failed to process correspondent "${name}":`, error.message);
-        throw error;
-    }
-}
+    const restrictToExistingCorrespondents =
+      options.restrictToExistingCorrespondents === true ||
+      (options.restrictToExistingCorrespondents === undefined &&
+        process.env.RESTRICT_TO_EXISTING_CORRESPONDENTS === 'yes');
 
-async searchForExistingDocumentType(documentType) {
-  try {
-      const response = await this.client.get('/document_types/', {
-          params: {
-              name__icontains: documentType
+    console.log(
+      `[DEBUG] Processing correspondent with restrictToExistingCorrespondents=${restrictToExistingCorrespondents}`
+    );
+
+    try {
+      // Search for the correspondent
+      const existingCorrespondent =
+        await this.searchForExistingCorrespondent(name);
+      console.log(
+        '[DEBUG] Response Correspondent Search: ',
+        existingCorrespondent
+      );
+
+      if (existingCorrespondent) {
+        console.log(
+          `[DEBUG] Found existing correspondent "${name}" with ID ${existingCorrespondent.id}`
+        );
+        return existingCorrespondent;
+      }
+
+      // If we're restricting to existing correspondents and none was found, return null
+      if (restrictToExistingCorrespondents) {
+        console.log(
+          `[DEBUG] Correspondent "${name}" does not exist and restrictions are enabled, returning null`
+        );
+        return null;
+      }
+
+      // Create new correspondent only if restrictions are not enabled
+      try {
+        const createResponse = await this.client.post('/correspondents/', {
+          name: name,
+        });
+        console.log(
+          `[DEBUG] Created new correspondent "${name}" with ID ${createResponse.data.id}`
+        );
+        return createResponse.data;
+      } catch (createError) {
+        if (
+          createError.response?.status === 400 &&
+          createError.response?.data?.error?.includes('unique constraint')
+        ) {
+          // Race condition check - another process might have created it
+          const retryResponse = await this.client.get('/correspondents/', {
+            params: { name: name },
+          });
+
+          const justCreatedCorrespondent = retryResponse.data.results.find(
+            (c) => c.name.toLowerCase() === name.toLowerCase()
+          );
+
+          if (justCreatedCorrespondent) {
+            console.log(
+              `[DEBUG] Retrieved correspondent "${name}" after constraint error with ID ${justCreatedCorrespondent.id}`
+            );
+            return justCreatedCorrespondent;
           }
+        }
+        throw createError;
+      }
+    } catch (error) {
+      console.error(
+        '[ERROR] Failed to process correspondent "%s":',
+        name,
+        error.message
+      );
+      throw error;
+    }
+  }
+
+  async searchForExistingDocumentType(documentType) {
+    try {
+      const response = await this.client.get('/document_types/', {
+        params: {
+          name__icontains: documentType,
+        },
       });
 
       const results = response.data.results;
-      
+
       if (results.length === 0) {
-          console.log(`[DEBUG] No document type with name "${documentType}" found`);
-          return null;
+        console.log(
+          `[DEBUG] No document type with name "${documentType}" found`
+        );
+        return null;
       }
-      
+
       // Check for exact match in the results
-      const exactMatch = results.find(dt => dt.name.toLowerCase() === documentType.toLowerCase());
+      const exactMatch = results.find(
+        (dt) => dt.name.toLowerCase() === documentType.toLowerCase()
+      );
       if (exactMatch) {
-          console.log(`[DEBUG] Found exact match for document type "${documentType}" with ID ${exactMatch.id}`);
-          return {
-              id: exactMatch.id,
-              name: exactMatch.name
-          };
+        console.log(
+          `[DEBUG] Found exact match for document type "${documentType}" with ID ${exactMatch.id}`
+        );
+        return {
+          id: exactMatch.id,
+          name: exactMatch.name,
+        };
       }
 
       // No exact match found, return null
       console.log(`[DEBUG] No exact match found for "${documentType}"`);
       return null;
-
-  } catch (error) {
-      console.error('[ERROR] while searching for existing document type:', error.message);
+    } catch (error) {
+      console.error(
+        '[ERROR] while searching for existing document type:',
+        error.message
+      );
       throw error;
+    }
   }
-}
 
-async getOrCreateDocumentType(name, options = {}) {
-  this.initialize();
+  async getOrCreateDocumentType(name, options = {}) {
+    this.initialize();
 
-  // Explicit option value wins; otherwise fall back to env config.
-  const restrictToExistingDocumentTypes = options.restrictToExistingDocumentTypes === true ||
-                                        (options.restrictToExistingDocumentTypes === undefined &&
-                                         process.env.RESTRICT_TO_EXISTING_DOCUMENT_TYPES === 'yes');
+    // Explicit option value wins; otherwise fall back to env config.
+    const restrictToExistingDocumentTypes =
+      options.restrictToExistingDocumentTypes === true ||
+      (options.restrictToExistingDocumentTypes === undefined &&
+        process.env.RESTRICT_TO_EXISTING_DOCUMENT_TYPES === 'yes');
 
-  console.log(`[DEBUG] Processing document type with restrictToExistingDocumentTypes=${restrictToExistingDocumentTypes}`);
-  
-  try {
+    console.log(
+      `[DEBUG] Processing document type with restrictToExistingDocumentTypes=${restrictToExistingDocumentTypes}`
+    );
+
+    try {
       // Suche nach existierendem document_type
       const existingDocType = await this.searchForExistingDocumentType(name);
-      console.log("[DEBUG] Response Document Type Search: ", existingDocType);
-  
+      console.log('[DEBUG] Response Document Type Search: ', existingDocType);
+
       if (existingDocType) {
-          console.log(`[DEBUG] Found existing document type "${name}" with ID ${existingDocType.id}`);
-          return existingDocType;
+        console.log(
+          `[DEBUG] Found existing document type "${name}" with ID ${existingDocType.id}`
+        );
+        return existingDocType;
       }
 
-        if (restrictToExistingDocumentTypes) {
-          console.log(`[DEBUG] Document type "${name}" does not exist and restrictions are enabled, returning null`);
-          return null;
-        }
-  
+      if (restrictToExistingDocumentTypes) {
+        console.log(
+          `[DEBUG] Document type "${name}" does not exist and restrictions are enabled, returning null`
+        );
+        return null;
+      }
+
       // Erstelle neuen document_type
       try {
-          const createResponse = await this.client.post('/document_types/', { 
-              name: name,
-              matching_algorithm: 1, // 1 = ANY
-              match: "",  // Optional: Kann später angepasst werden
-              is_insensitive: true
-          });
-          console.log(`[DEBUG] Created new document type "${name}" with ID ${createResponse.data.id}`);
-          return createResponse.data;
+        const createResponse = await this.client.post('/document_types/', {
+          name: name,
+          matching_algorithm: 1, // 1 = ANY
+          match: '', // Optional: Kann später angepasst werden
+          is_insensitive: true,
+        });
+        console.log(
+          `[DEBUG] Created new document type "${name}" with ID ${createResponse.data.id}`
+        );
+        return createResponse.data;
       } catch (createError) {
-          if (createError.response?.status === 400 && 
-              createError.response?.data?.error?.includes('unique constraint')) {
-            
-              // Race condition check
-              const retryResponse = await this.client.get('/document_types/', {
-                  params: { name: name }
-              });
-            
-              const justCreatedDocType = retryResponse.data.results.find(
-                  dt => dt.name.toLowerCase() === name.toLowerCase()
-              );
-            
-              if (justCreatedDocType) {
-                  console.log(`[DEBUG] Retrieved document type "${name}" after constraint error with ID ${justCreatedDocType.id}`);
-                  return justCreatedDocType;
-              }
+        if (
+          createError.response?.status === 400 &&
+          createError.response?.data?.error?.includes('unique constraint')
+        ) {
+          // Race condition check
+          const retryResponse = await this.client.get('/document_types/', {
+            params: { name: name },
+          });
+
+          const justCreatedDocType = retryResponse.data.results.find(
+            (dt) => dt.name.toLowerCase() === name.toLowerCase()
+          );
+
+          if (justCreatedDocType) {
+            console.log(
+              `[DEBUG] Retrieved document type "${name}" after constraint error with ID ${justCreatedDocType.id}`
+            );
+            return justCreatedDocType;
           }
-          throw createError;
+        }
+        throw createError;
       }
-  } catch (error) {
-      console.error(`[ERROR] Failed to process document type "${name}":`, error.message);
+    } catch (error) {
+      console.error(
+        `[ERROR] Failed to process document type "${name}":`,
+        error.message
+      );
       throw error;
+    }
   }
-}
 
   async removeUnusedTagsFromDocument(documentId, keepTagIds) {
     this.initialize();
     if (!this.client) return;
-  
+
     try {
-      console.log(`[DEBUG] Removing unused tags from document ${documentId}, keeping tags:`, keepTagIds);
-      
+      console.log(
+        '[DEBUG] Removing unused tags from document %s, keeping tags:',
+        documentId,
+        keepTagIds
+      );
+
       // Hole aktuelles Dokument
       const currentDoc = await this.getDocument(documentId);
-      
+
       // Finde Tags die entfernt werden sollen (die nicht in keepTagIds sind)
-      const tagsToRemove = currentDoc.tags.filter(tagId => !keepTagIds.includes(tagId));
-      
+      const tagsToRemove = currentDoc.tags.filter(
+        (tagId) => !keepTagIds.includes(tagId)
+      );
+
       if (tagsToRemove.length === 0) {
         console.log('[DEBUG] No tags to remove');
         return currentDoc;
       }
-  
+
       // Update das Dokument mit nur den zu behaltenden Tags
       const updateData = {
-        tags: keepTagIds
+        tags: keepTagIds,
       };
-  
+
       // Führe das Update durch
       await this.client.patch(`/documents/${documentId}/`, updateData);
-      console.log(`[DEBUG] Successfully removed ${tagsToRemove.length} tags from document ${documentId}`);
-      
+      console.log(
+        `[DEBUG] Successfully removed ${tagsToRemove.length} tags from document ${documentId}`
+      );
+
       return await this.getDocument(documentId);
     } catch (error) {
-      console.error(`[ERROR] Error removing unused tags from document ${documentId}:`, error.message);
+      console.error(
+        '[ERROR] Error removing unused tags from document %s:',
+        documentId,
+        error.message
+      );
       throw error;
     }
   }
@@ -1557,36 +1746,92 @@ async getOrCreateDocumentType(name, options = {}) {
       const response = await this.client.get(`/tags/${tagId}/`);
       return response.data.name;
     } catch (error) {
-      console.error(`[ERROR] fetching tag text for ID ${tagId}:`, error.message);
+      console.error(
+        `[ERROR] fetching tag text for ID ${tagId}:`,
+        error.message
+      );
       return null;
+    }
+  }
+
+  /**
+   * Lightweight probe against the configured Paperless-ngx instance.
+   *
+   * Used by the startup retry loop and by every scan run: most read helpers in
+   * this service swallow transport errors and return empty results, which makes
+   * an unreachable Paperless indistinguishable from "nothing to do". This call
+   * makes that distinction explicit and never throws.
+   *
+   * @returns {Promise<{reachable: boolean, authorized: boolean, status: number|null, error: string|null}>}
+   *   reachable: an HTTP response was received (the host answered).
+   *   authorized: the API token is accepted (not 401/403).
+   */
+  async checkConnection() {
+    this.initialize();
+
+    if (!this.client) {
+      return {
+        reachable: false,
+        authorized: false,
+        status: null,
+        error: 'Paperless-ngx client is not configured',
+      };
+    }
+
+    try {
+      const response = await this.client.get('/users/', {
+        params: { current_user: true, page_size: 1 },
+        timeout: CONNECTION_PROBE_TIMEOUT_MS,
+      });
+
+      return {
+        reachable: true,
+        authorized: true,
+        status: response.status || 200,
+        error: null,
+      };
+    } catch (error) {
+      const status = error.response?.status ?? null;
+
+      // A status code means the host answered, so it is reachable — only the
+      // credentials or permissions may be wrong. Without a status the request
+      // never got through, so authorization is unknown and reported as false.
+      return {
+        reachable: status !== null,
+        authorized: status !== null && status !== 401 && status !== 403,
+        status,
+        error: error.message || 'Unknown connection error',
+      };
     }
   }
 
   async getOwnUserID() {
     this.initialize();
     try {
-        const response = await this.client.get('/users/', {
-            params: {
-                current_user: true,
-                full_perms: true
-            }
-        });
-        
-        if (response.data.results && response.data.results.length > 0) {
-            const userInfo = response.data.results;
-            //filter for username by process.env.PAPERLESS_USERNAME
-            const user = userInfo.find(user => user.username === process.env.PAPERLESS_USERNAME);
-            if (user) {
-                console.log(`[DEBUG] Found own user ID: ${user.id}`);
-                return user.id;
-            }
+      const response = await this.client.get('/users/', {
+        params: {
+          current_user: true,
+          full_perms: true,
+        },
+      });
+
+      if (response.data.results && response.data.results.length > 0) {
+        const userInfo = response.data.results;
+        //filter for username by process.env.PAPERLESS_USERNAME
+        const user = userInfo.find(
+          (user) => user.username === process.env.PAPERLESS_USERNAME
+        );
+        if (user) {
+          console.log(`[DEBUG] Found own user ID: ${user.id}`);
+          return user.id;
         }
-        return null;
+      }
+      return null;
     } catch (error) {
-        console.error('[ERROR] fetching own user ID:', error.message);
-        return null;
+      console.error('[ERROR] fetching own user ID:', error.message);
+      return null;
     }
-}
+  }
   //Remove if not needed?
   async getOwnerOfDocument(documentId) {
     this.initialize();
@@ -1594,7 +1839,10 @@ async getOrCreateDocumentType(name, options = {}) {
       const response = await this.client.get(`/documents/${documentId}/`);
       return response.data.owner;
     } catch (error) {
-      console.error(`[ERROR] fetching owner of document ${documentId}:`, error.message);
+      console.error(
+        `[ERROR] fetching owner of document ${documentId}:`,
+        error.message
+      );
       return null;
     }
   }
@@ -1606,31 +1854,42 @@ async getOrCreateDocumentType(name, options = {}) {
       const response = await this.client.get(`/documents/${documentId}/`);
       return response.data.user_can_change;
     } catch (error) {
-      console.error(`[ERROR] No Permission to edit document ${documentId}:`, error.message);
+      console.error(
+        `[ERROR] No Permission to edit document ${documentId}:`,
+        error.message
+      );
       return null;
     }
   }
-
 
   async updateDocument(documentId, updates) {
     this.initialize();
     if (!this.client) return;
     try {
       const currentDoc = await this.getDocument(documentId);
-      
+
       if (updates.tags) {
-        console.log(`[DEBUG] Current tags for document ${documentId}:`, currentDoc.tags);
+        console.log(
+          '[DEBUG] Current tags for document %s:',
+          documentId,
+          currentDoc.tags
+        );
         console.log(`[DEBUG] Adding new tags:`, updates.tags);
         console.log(`[DEBUG] Current correspondent:`, currentDoc.correspondent);
         console.log(`[DEBUG] New correspondent:`, updates.correspondent);
-                
-        const combinedTags = [...new Set([...currentDoc.tags, ...updates.tags])];
+
+        const combinedTags = [
+          ...new Set([...currentDoc.tags, ...updates.tags]),
+        ];
         updates.tags = combinedTags;
-        
+
         console.log(`[DEBUG] Combined tags:`, combinedTags);
       }
 
-      if (updates.correspondent === null || updates.correspondent === undefined) {
+      if (
+        updates.correspondent === null ||
+        updates.correspondent === undefined
+      ) {
         // Keep existing correspondent when no new value is provided
         delete updates.correspondent;
       }
@@ -1654,10 +1913,14 @@ async getOrCreateDocumentType(name, options = {}) {
           }
 
           if (!isValid(dateObject)) {
-            console.warn(`[WARN] Invalid date format: ${updates.created}, skipping date update`);
+            console.warn(
+              `[WARN] Invalid date format: ${updates.created}, skipping date update`
+            );
             delete updates.created;
           } else if (dateObject > new Date()) {
-            console.warn(`[WARN] AI returned future date ${format(dateObject, 'yyyy-MM-dd')}, skipping date update`);
+            console.warn(
+              `[WARN] AI returned future date ${format(dateObject, 'yyyy-MM-dd')}, skipping date update`
+            );
             delete updates.created;
           } else {
             updates.created = format(dateObject, 'yyyy-MM-dd');
@@ -1687,20 +1950,26 @@ async getOrCreateDocumentType(name, options = {}) {
       //     await this.client.patch(`/documents/${documentId}/`, { custom_fields: [] });
       //   }
       // }
-      
+
       // Validate title length before sending to API
       if (updateData.title && updateData.title.length > 128) {
         updateData.title = updateData.title.substring(0, 124) + '…';
-        console.warn(`[WARN] Title truncated to 128 characters for document ${documentId}`);
+        console.warn(
+          `[WARN] Title truncated to 128 characters for document ${documentId}`
+        );
       }
-      
+
       console.log('[DEBUG] Final update data:', updateData);
       await this.client.patch(`/documents/${documentId}/`, updateData);
-      console.log(`[SUCCESS] Updated document ${documentId} with:`, updateData);
+      console.log(
+        '[SUCCESS] Updated document %s with:',
+        documentId,
+        updateData
+      );
       return await this.getDocument(documentId);
     } catch (error) {
       console.log(error);
-      console.error(`[ERROR] updating document ${documentId}:`, error.message);
+      console.error('[ERROR] updating document %s:', documentId, error.message);
       return null;
     }
   }
@@ -1717,13 +1986,18 @@ async getOrCreateDocumentType(name, options = {}) {
     if (!this.client) return null;
     try {
       const patch = {};
-      if (Array.isArray(original.tags))          patch.tags          = original.tags;
-      if (original.title != null)                 patch.title         = original.title;
-      if (original.correspondent !== undefined)   patch.correspondent = original.correspondent;
-      if (original.documentType   !== undefined)  patch.document_type = original.documentType;
-      if (original.language       != null)        patch.language      = original.language;
+      if (Array.isArray(original.tags)) patch.tags = original.tags;
+      if (original.title != null) patch.title = original.title;
+      if (original.correspondent !== undefined)
+        patch.correspondent = original.correspondent;
+      if (original.documentType !== undefined)
+        patch.document_type = original.documentType;
+      if (original.language != null) patch.language = original.language;
 
-      console.log(`[DEBUG] Restoring document ${documentId} to original state:`, patch);
+      console.log(
+        `[DEBUG] Restoring document ${documentId} to original state:`,
+        patch
+      );
       await this.client.patch(`/documents/${documentId}/`, patch);
       console.log(`[SUCCESS] Restored document ${documentId}`);
       return await this.getDocument(documentId);
@@ -1733,6 +2007,5 @@ async getOrCreateDocumentType(name, options = {}) {
     }
   }
 }
-
 
 module.exports = new PaperlessService();

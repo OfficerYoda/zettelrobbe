@@ -50,6 +50,7 @@ const TESTS = {
   'setup-preset-manual-reset': 'test-setup-preset-manual-reset.js',
   'rate-limiting': 'test-rate-limiting.js',
   'scan-stop-flow': 'test-scan-stop-flow.js',
+  'scanner-startup-resilience': 'test-scanner-startup-resilience.js',
   'setup-auth-endpoint-protection': 'test-setup-auth-endpoint-protection.js',
   'setup-auth-middleware-guards': 'test-setup-auth-middleware-guards.js',
   'setup-remote-guard': 'test-setup-remote-guard.js',
@@ -57,6 +58,10 @@ const TESTS = {
   'thumbnail-startup-migration': 'test-thumbnail-startup-migration.js',
   'restriction-service': 'test-restriction-service.js',
   'updated-service': 'test-updated-service.js',
+  'prompt-existing-data-serialization':
+    'test-prompt-existing-data-serialization.js',
+  'restricted-document-types-placeholder':
+    'test-restricted-document-types-placeholder.js',
   'ssrf-url-validation': 'test-ssrf-url-validation.js',
   'external-api-ssrf-block': 'test-external-api-ssrf-block.js',
   'ui-xss-hardening': 'test-ui-xss-hardening.js',
@@ -84,6 +89,7 @@ const TESTS = {
   'setup-route-security': 'test-setup-route-security.js',
   'setup-wizard-tag-default': 'test-setup-wizard-tag-default.js',
   'setupservice-ocr-validation': 'test-setupservice-ocr-validation.js',
+  'redirect-guard': 'test-redirect-guard.js',
   'thumbnail-cache-path-sanitization':
     'test-thumbnail-cache-path-sanitization.js',
   'url-base-validation': 'test-url-base-validation.js',
@@ -118,6 +124,7 @@ const AREAS = {
     'ollama-temperature-wiring',
     'pr772-fix',
     'scan-stop-flow',
+    'scanner-startup-resilience',
     'thumbnail-startup-migration',
     'ai-temperature-config',
     'custom-field-monetary-normalization',
@@ -125,7 +132,12 @@ const AREAS = {
     'reconciliation-service',
     'settings-paperless-url-fallback',
   ],
-  prompts: ['restriction-service', 'updated-service'],
+  prompts: [
+    'restriction-service',
+    'updated-service',
+    'prompt-existing-data-serialization',
+    'restricted-document-types-placeholder',
+  ],
   quickstart: [
     'quickstart-model-classification',
     'setup-wizard-quickstart',
@@ -141,6 +153,7 @@ const AREAS = {
     'quickstart-endpoint-protection',
     'ssrf-url-validation',
     'external-api-ssrf-block',
+    'redirect-guard',
     'ui-xss-hardening',
     'history-xss-hardening',
     'reset-local-overrides-password-guard',
