@@ -42,6 +42,8 @@ const TESTS = {
   'login-mfa-flow': 'test-login-mfa-flow.js',
   'ocr-fallback-ai-errors': 'test-ocr-fallback-ai-errors.js',
   'ocr-startup-recovery': 'test-ocr-startup-recovery.js',
+  'search-documents-exact-id': 'test-search-documents-exact-id.js',
+  'document-metadata-batching': 'test-document-metadata-batching.js',
   'pr772-fix': 'test-pr772-fix.js',
   'ollama-temperature-wiring': 'test-ollama-temperature-wiring.js',
   'quickstart-model-classification': 'test-quickstart-model-classification.js',
@@ -100,6 +102,8 @@ const AREAS = {
   ocr: [
     'ocr-fallback-ai-errors',
     'ocr-startup-recovery',
+    'search-documents-exact-id',
+    'document-metadata-batching',
     'mistral-ocr-no-processed-on-update-failure',
     'ocr-provider-lmstudio-compatible',
     'ocr-provider-ollama',
