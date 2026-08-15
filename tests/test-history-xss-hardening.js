@@ -13,6 +13,18 @@ function assertNotIncludes(content, snippet, message) {
   }
 }
 
+/**
+ * The class only has to be on the element, not at the start of the attribute —
+ * the buttons carry framework classes alongside it since they moved into the
+ * row menu.
+ */
+function assertHasClass(content, className, message) {
+  const pattern = new RegExp(`class="[^"]*\\b${className}\\b`);
+  if (!pattern.test(content)) {
+    throw new Error(message);
+  }
+}
+
 function run() {
   console.log('\n=== History XSS Hardening Checks ===');
 
@@ -21,24 +33,26 @@ function run() {
 
   assertNotIncludes(
     historyContent,
-    "onclick=\"window.open('${data.link}')\"",
+    'onclick="window.open(\'${data.link}\')"',
     'History view button must not use inline window.open handler'
   );
+  // The chat feature is gone and /chat answers nothing, so the row menu must
+  // not offer it again — an entry that opens a 404 is worse than no entry.
   assertNotIncludes(
     historyContent,
-    "onclick=\"window.open('/chat?open=${data.document_id}')\"",
-    'History chat button must not use inline window.open handler'
+    '/chat?open=',
+    'History row menu must not link to the removed chat page'
   );
 
-  assertIncludes(
+  assertHasClass(
     historyContent,
-    'class="history-view-btn',
+    'history-view-btn',
     'History view button should use dedicated class for safe event binding'
   );
-  assertIncludes(
+  assertHasClass(
     historyContent,
-    'class="history-chat-btn',
-    'History chat button should use dedicated class for safe event binding'
+    'history-ocr-btn',
+    'History OCR button should use dedicated class for safe event binding'
   );
 
   assertIncludes(
@@ -53,13 +67,8 @@ function run() {
   );
   assertIncludes(
     historyContent,
-    "if (!/^\\d+$/.test(docId))",
-    'History chat action must validate numeric document ids'
-  );
-  assertIncludes(
-    historyContent,
-    'encodeURIComponent(docId)',
-    'History chat action must URL-encode document ids'
+    'if (!/^\\d+$/.test(docId))',
+    'History row actions must validate numeric document ids'
   );
 
   console.log('✅ History XSS hardening checks passed');

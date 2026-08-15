@@ -1,0 +1,118 @@
+/* ==========================================================================
+   The queue pages: OCR (progress overlay, run log, disabled state) and
+   the ignored-documents list.
+   @layer pages: above the framework layers, below utilities.
+   ========================================================================== */
+
+@layer pages {
+  /* --- ocr ------------------------------------------------------------- */
+  /* The OCR run log inside the progress dialog. The dialog itself is the
+     framework component; only the log is particular to this page pair. It
+     once referenced --input-bg / --border-color / --text-color, which this
+     framework never defined, so it fell back to the hardcoded greys those
+     declarations shipped with. */
+  .zr-ocrlog {
+    margin-top: var(--zr-3);
+    max-height: 260px;
+    overflow-y: auto;
+    font-family: var(--zr-font-mono);
+    font-size: var(--zr-fs-sm);
+    line-height: 1.5;
+    background: var(--zr-surface-sunken);
+    border: 1px solid var(--zr-line);
+    border-radius: var(--zr-r-md);
+    padding: var(--zr-3);
+    color: var(--zr-text);
+  }
+
+  .log-line {
+    display: flex;
+    align-items: flex-start;
+    gap: var(--zr-2);
+    margin-bottom: 4px;
+  }
+
+  /* Keeps the newlines of the OCR dump that "Show OCR output" pours in here,
+     and breaks the long unbroken runs a scan of a table can produce. */
+  .log-line__text {
+    min-width: 0;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  /* One document inside a bulk run, set in from the run-level lines. */
+  .log-line--nested {
+    padding-left: var(--zr-4);
+  }
+
+  /* The step is carried by its icon. Colouring whole lines by step turned
+     almost every one of them blue, which said nothing and drowned out the
+     two that matter. */
+  .log-line .zr-icon {
+    flex: none;
+    margin-top: 3px;
+    color: var(--zr-text-muted);
+  }
+  .log-ai .zr-icon {
+    color: var(--zr-brand);
+  }
+  .log-done {
+    color: var(--zr-ok);
+    font-weight: 600;
+  }
+  .log-done .zr-icon {
+    color: var(--zr-ok);
+  }
+  .log-error {
+    color: var(--zr-danger);
+    font-weight: 600;
+  }
+  .log-error .zr-icon {
+    color: var(--zr-danger);
+  }
+
+  .disabled-overlay {
+    text-align: center;
+    padding: 3rem 2rem;
+  }
+
+  .ocr-env-codeblock {
+    display: block;
+    width: min(100%, 34rem);
+    margin: 0 auto 1rem;
+    text-align: left;
+    font-family: var(--zr-font-mono);
+    font-size: 0.82rem;
+    line-height: 1.45;
+    background: var(--zr-canvas);
+    border: 1px solid var(--zr-line);
+    border-radius: 0.75rem;
+    padding: 0.85rem 1rem;
+    overflow-x: auto;
+    white-space: pre;
+  }
+
+  @media (max-width: 640px) {
+    .disabled-overlay {
+      padding: 1.5rem 1rem;
+    }
+
+    .ocr-env-codeblock {
+      width: 100%;
+      font-size: 0.75rem;
+      line-height: 1.35;
+      padding: 0.7rem 0.75rem;
+    }
+  }
+
+  /* --- ignored ------------------------------------------------------------- */
+
+  /* A document id is a handful of digits, so the field stays short beside the
+     reason and the button. Only above the phone breakpoint: below it the row
+     stacks and every field takes the full width. */
+  @media (min-width: 861px) {
+    .ignore-docid {
+      max-width: 160px;
+    }
+  }
+}

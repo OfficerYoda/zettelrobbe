@@ -100,6 +100,26 @@ const insertMetrics = db.prepare(`
   VALUES (?, ?, ?, ?)
 `);
 
+// The dashboard only needs the aggregates, never the rows. COALESCE keeps rows
+// with a missing token count in the denominator, which is what the previous
+// JavaScript reduce did when it added `undefined` as 0.
+const selectMetricsSummary = db.prepare(`
+  SELECT
+    COUNT(*) as sampleCount,
+    AVG(COALESCE(promptTokens, 0)) as avgPromptTokens,
+    AVG(COALESCE(completionTokens, 0)) as avgCompletionTokens,
+    AVG(COALESCE(totalTokens, 0)) as avgTotalTokens,
+    COALESCE(SUM(COALESCE(totalTokens, 0)), 0) as totalTokensOverall
+  FROM openai_metrics
+`);
+
+const emptyMetricsSummary = () => ({
+  averagePromptTokens: 0,
+  averageCompletionTokens: 0,
+  averageTotalTokens: 0,
+  tokensOverall: 0,
+});
+
 const insertUser = db.prepare(`
   INSERT INTO users (username, password)
   VALUES (?, ?)
@@ -304,6 +324,42 @@ const MIGRATIONS = [
       `);
     },
   },
+  {
+    version: 9,
+    description: 'Add dashboard_layout column to users table',
+    up: (database) => {
+      const userColumns = database.prepare("PRAGMA table_info('users')").all();
+      const hasColumn = userColumns.some(
+        (col) => col.name === 'dashboard_layout'
+      );
+      if (!hasColumn) {
+        database.exec(
+          'ALTER TABLE users ADD COLUMN dashboard_layout TEXT DEFAULT NULL'
+        );
+      }
+    },
+  },
+  {
+    version: 10,
+    description: 'Add wrote_back column to ocr_queue',
+    up: (database) => {
+      // Records whether the OCR text reached Paperless-ngx. A finished item
+      // whose text was accepted is deleted from the queue, so from here on a
+      // surviving 'done' row means the text exists nowhere but here. Rows that
+      // completed before this migration keep NULL: their outcome was never
+      // recorded and cannot be reconstructed without asking Paperless-ngx for
+      // every one of them.
+      const queueColumns = database
+        .prepare("PRAGMA table_info('ocr_queue')")
+        .all();
+      const hasColumn = queueColumns.some((col) => col.name === 'wrote_back');
+      if (!hasColumn) {
+        database.exec(
+          'ALTER TABLE ocr_queue ADD COLUMN wrote_back INTEGER DEFAULT NULL'
+        );
+      }
+    },
+  },
 ];
 
 function runMigrations(database) {
@@ -396,12 +452,31 @@ module.exports = {
     }
   },
 
-  async getMetrics() {
+  /**
+   * Token averages and the overall total, aggregated by SQLite.
+   *
+   * Replaces `getMetrics()`, which materialized every openai_metrics row just
+   * so the dashboard could reduce over it four times. The table grows with
+   * every processed document; these four numbers do not.
+   */
+  async getMetricsSummary() {
     try {
-      return db.prepare('SELECT * FROM openai_metrics').all();
+      const row = selectMetricsSummary.get();
+      if (!row || !row.sampleCount) {
+        return emptyMetricsSummary();
+      }
+
+      return {
+        // Rounded here rather than in SQL so the values stay bit-for-bit what
+        // Math.round() produced before.
+        averagePromptTokens: Math.round(row.avgPromptTokens || 0),
+        averageCompletionTokens: Math.round(row.avgCompletionTokens || 0),
+        averageTotalTokens: Math.round(row.avgTotalTokens || 0),
+        tokensOverall: Number(row.totalTokensOverall || 0),
+      };
     } catch (error) {
-      console.error('[ERROR] getting metrics:', error);
-      return [];
+      console.error('[ERROR] getting metrics summary:', error);
+      return emptyMetricsSummary();
     }
   },
 
@@ -857,6 +932,37 @@ module.exports = {
     }
   },
 
+  /* The dashboard grid the user arranged, stored as the JSON string the route
+     validated. Malformed rows return null so the dashboard falls back to the
+     order the markup ships with. */
+  async getDashboardLayout(username) {
+    try {
+      const row = db
+        .prepare('SELECT dashboard_layout FROM users WHERE username = ?')
+        .get(username);
+      if (!row || !row.dashboard_layout) {
+        return null;
+      }
+      return JSON.parse(row.dashboard_layout);
+    } catch (error) {
+      console.error('[ERROR] getting dashboard layout:', error);
+      return null;
+    }
+  },
+
+  /* Passing null clears the layout, which is how "reset to default" works. */
+  async setDashboardLayout(username, layout) {
+    try {
+      const result = db
+        .prepare('UPDATE users SET dashboard_layout = ? WHERE username = ?')
+        .run(layout === null ? null : JSON.stringify(layout), username);
+      return result.changes > 0;
+    } catch (error) {
+      console.error('[ERROR] setting dashboard layout:', error);
+      return false;
+    }
+  },
+
   async getProcessingTimeStats() {
     try {
       return db
@@ -905,16 +1011,29 @@ module.exports = {
     }
   },
 
+  /**
+   * Document type distribution for the dashboard chart.
+   *
+   * This used to read `substr(title, 1, instr(title || ' ', ' ') - 1)` from
+   * processed_documents — the first word of the title. That happens to look
+   * plausible for "Invoice 2026-0041 …" and turns into noise for everything
+   * else, and it was never the document type. history_documents carries the
+   * type the AI actually assigned, written on every processed document.
+   *
+   * Not limited: the caller groups the tail itself and needs the full set to
+   * report how much it grouped.
+   */
   async getDocumentTypeStats() {
     try {
       return db
         .prepare(
           `
-        SELECT 
-          substr(title, 1, instr(title || ' ', ' ') - 1) as type,
+        SELECT
+          COALESCE(NULLIF(TRIM(document_type_name), ''), 'Unclassified') as type,
           COUNT(*) as count
-        FROM processed_documents
-        GROUP BY type
+        FROM history_documents
+        GROUP BY COALESCE(NULLIF(TRIM(document_type_name), ''), 'Unclassified')
+        ORDER BY count DESC, type ASC
       `
         )
         .all();
@@ -1174,19 +1293,34 @@ module.exports = {
     }
   },
 
-  async updateOcrQueueStatus(documentId, status, ocrText = null) {
+  // wroteBack stays null when the caller has nothing to say about the
+  // write-back, which is every call that is not the end of an OCR run. COALESCE
+  // then keeps whatever the run before recorded instead of erasing it.
+  async updateOcrQueueStatus(
+    documentId,
+    status,
+    ocrText = null,
+    wroteBack = null
+  ) {
     try {
+      const wroteBackValue =
+        wroteBack === null || wroteBack === undefined
+          ? null
+          : wroteBack
+            ? 1
+            : 0;
       const result = db
         .prepare(
           `
         UPDATE ocr_queue SET
           status = ?,
           ocr_text = COALESCE(?, ocr_text),
+          wrote_back = COALESCE(?, wrote_back),
           processed_at = CASE WHEN ? IN ('done', 'failed') THEN CURRENT_TIMESTAMP ELSE processed_at END
         WHERE document_id = ?
       `
         )
-        .run(status, ocrText, status, documentId);
+        .run(status, ocrText, wroteBackValue, status, documentId);
       return result.changes > 0;
     } catch (error) {
       console.error('[ERROR] updating OCR queue status:', error);

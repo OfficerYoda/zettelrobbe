@@ -1,0 +1,565 @@
+/* ==========================================================================
+   Dashboard.
+   @layer pages: above the framework layers, below utilities.
+   ========================================================================== */
+
+@layer pages {
+  /* The health banner and the KPI row are both shown and hidden by the module, so
+     their spacing has to sit on the elements themselves — a sibling rule would
+     collapse along with them. */
+  [data-module='dashboard'] > .zr-alert {
+    margin-bottom: var(--zr-4);
+  }
+  [data-module='dashboard'] > .zr-stats {
+    margin-bottom: var(--zr-4);
+  }
+
+  /* --- loading state ------------------------------------------------------
+     Every figure on this page arrives from one fetch, so until it lands the
+     page is a grid of em dashes and empty boxes — which reads as "no data",
+     not as "still loading". The module carries data-loading until the stats
+     land (and drops it on failure too, where the stale banner takes over), and
+     these rules turn the slots that are about to be filled into placeholders
+     of the right shape. Selecting by the value classes rather than by id keeps
+     a new card covered without another rule. */
+  /* A width, not a min-width: these slots sit in flex rows that would otherwise
+     stretch the bar across the whole card, and a placeholder the size of a
+     paragraph does not read as "a number is coming". */
+  [data-module='dashboard'][data-loading] :is(.zr-stat__value, .zr-kv__v) {
+    display: inline-block;
+    width: 4ch;
+    color: transparent;
+    user-select: none;
+  }
+  [data-module='dashboard'][data-loading] .zr-entitybtn strong {
+    display: inline-block;
+    width: 3ch;
+    color: transparent;
+  }
+
+  /* The chart bodies are empty elements until their module draws into them, so
+     they need a height of their own to stand in for. */
+  [data-module='dashboard'][data-loading] .zr-donut {
+    width: var(--zr-donut-size, 112px);
+    height: var(--zr-donut-size, 112px);
+    border-radius: 50%;
+  }
+  [data-module='dashboard'][data-loading] .zr-spark {
+    height: 48px;
+  }
+  [data-module='dashboard'][data-loading] :is(.zr-barlist, .zr-list) {
+    min-height: 96px;
+  }
+  [data-module='dashboard'][data-loading] .zr-module__foot + .zr-list {
+    min-height: 132px;
+  }
+
+  /* The sheen itself comes from the same token the .zr-skeleton component
+     paints with, so there is one definition of what a placeholder looks like. */
+  [data-module='dashboard'][data-loading]
+    :is(
+      .zr-stat__value,
+      .zr-kv__v,
+      .zr-entitybtn strong,
+      .zr-donut,
+      .zr-spark,
+      .zr-barlist,
+      .zr-list
+    ) {
+    background: var(--zr-skeleton-bg) 0 0 / 200% 100%;
+    border-radius: var(--zr-r-sm);
+    animation: zr-shimmer 1.4s linear infinite;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    [data-module='dashboard'][data-loading] * {
+      animation: none;
+    }
+  }
+
+  /* --- the runner seal ----------------------------------------------------
+     While a scan is on, the card shows the seal working through the pile: she
+     reaches for the unread stack, a sheet lifts into her flippers, she holds
+     it up in front of herself — the mascot's own pose — and lays it on the
+     sorted one as the tick fires. One cycle is 3.2s: pick until 30%, hold
+     until 58%, place until 78%, then a beat of rest. Every timed animation
+     below shares that clock so the flippers meet the sheet they carry.
+     Everything only runs under .is-scanning, which the module sets from the
+     same state the scan buttons read — an idle card paints nothing and
+     animates nothing. */
+  .runner-seal {
+    display: none;
+    /* Shrinks with the card instead of disappearing from it: the scene stays
+       legible down to about a third of its size, and the status line beside it
+       keeps the room it needs because the seal never takes more than its
+       share. */
+    flex: 0 1 200px;
+    max-width: 42%;
+    min-width: 0;
+    margin: calc(var(--zr-2) * -1) 0;
+  }
+  .zr-module.is-scanning .runner-seal {
+    display: block;
+  }
+  .runner-seal svg {
+    width: 100%;
+    height: auto;
+  }
+
+  .runner-seal__body {
+    transform-box: fill-box;
+    transform-origin: 50% 100%;
+    animation: seal-breathe 3.2s ease-in-out infinite;
+  }
+  .runner-seal__head {
+    transform-box: fill-box;
+    transform-origin: 50% 100%;
+    /* Her head follows the sheet: pile, then the one she holds, then across. */
+    animation: seal-watch 3.2s ease-in-out infinite;
+  }
+  .runner-seal__eyes {
+    transform-box: fill-box;
+    transform-origin: 50% 50%;
+    animation: seal-blink 5.6s infinite;
+  }
+  /* Both flippers pivot at their shoulder — the root of the fin, top of its
+     own box. The left one picks, the right one places. */
+  .runner-seal__flipper {
+    transform-box: fill-box;
+    transform-origin: 90% 5%;
+    animation: seal-pick 3.2s ease-in-out infinite;
+  }
+  .runner-seal__flipper--place {
+    transform-origin: 10% 5%;
+    animation-name: seal-place;
+  }
+  .runner-seal__tail {
+    transform-box: fill-box;
+    transform-origin: 10% 50%;
+    animation: seal-wag 3.2s ease-in-out infinite;
+  }
+  .runner-seal__sheet {
+    transform-box: view-box;
+    animation: seal-sheet 3.2s ease-in-out infinite;
+  }
+  .runner-seal__tick {
+    transform-box: fill-box;
+    transform-origin: 50% 50%;
+    animation: seal-tick 3.2s ease-in-out infinite;
+  }
+  .runner-seal__inbox {
+    animation: seal-pile-shrink 3.2s ease-in-out infinite;
+  }
+  .runner-seal__outbox rect:last-of-type {
+    transform-box: fill-box;
+    transform-origin: 50% 100%;
+    animation: seal-pile-grow 3.2s ease-in-out infinite;
+  }
+
+  @keyframes seal-breathe {
+    0%,
+    100% {
+      transform: translateY(0) scale(1, 1);
+    }
+    50% {
+      transform: translateY(-1.5px) scale(1.01, 0.99);
+    }
+  }
+  @keyframes seal-watch {
+    0%,
+    100% {
+      transform: rotate(-7deg);
+    }
+    30%,
+    58% {
+      transform: rotate(-1deg);
+    }
+    78% {
+      transform: rotate(7deg);
+    }
+  }
+  @keyframes seal-blink {
+    0%,
+    92%,
+    97%,
+    100% {
+      transform: scaleY(1);
+    }
+    94% {
+      transform: scaleY(0.08);
+    }
+  }
+  /* Positive rotation swings a hanging fin up and outward, negative presses it
+     in. While she holds the sheet the fins sit behind it, pressed in by a few
+     degrees so their outer edges stay visible beside the paper — the sheet
+     itself hides the rest. The left fin is already reaching at 0% and again at
+     100%, so the loop closes mid-gesture instead of snapping. */
+  @keyframes seal-pick {
+    0%,
+    6%,
+    100% {
+      transform: rotate(46deg);
+    }
+    30%,
+    58% {
+      transform: rotate(-8deg);
+    }
+    74%,
+    88% {
+      transform: rotate(0deg);
+    }
+  }
+  @keyframes seal-place {
+    0%,
+    24%,
+    90%,
+    100% {
+      transform: rotate(0deg);
+    }
+    34%,
+    58% {
+      transform: rotate(8deg);
+    }
+    78% {
+      transform: rotate(-65deg);
+    }
+  }
+  @keyframes seal-wag {
+    0%,
+    100% {
+      transform: rotate(0deg);
+    }
+    50% {
+      transform: rotate(-8deg);
+    }
+  }
+  /* The sheet fades in on the left pile, is carried up in front of the seal,
+     rocks a little while she holds it, then travels onto the right pile and
+     fades as it is filed in. Faded out both ends, so the loop's jump back to
+     the left is never seen. */
+  @keyframes seal-sheet {
+    0% {
+      transform: translate(29px, 66px) rotate(0deg) scale(0.92);
+      opacity: 0;
+    }
+    6% {
+      transform: translate(29px, 64px) rotate(0deg) scale(0.96);
+      opacity: 1;
+    }
+    30% {
+      transform: translate(100px, 70px) rotate(-2deg) scale(1);
+      opacity: 1;
+    }
+    44% {
+      transform: translate(100px, 69.5px) rotate(1deg) scale(1);
+      opacity: 1;
+    }
+    58% {
+      transform: translate(100px, 70px) rotate(-2deg) scale(1);
+      opacity: 1;
+    }
+    78% {
+      transform: translate(176px, 64px) rotate(0deg) scale(0.96);
+      opacity: 1;
+    }
+    86%,
+    100% {
+      transform: translate(176px, 66px) rotate(0deg) scale(0.92);
+      opacity: 0;
+    }
+  }
+  @keyframes seal-tick {
+    0%,
+    74%,
+    100% {
+      opacity: 0;
+      transform: scale(0.6);
+    }
+    82% {
+      opacity: 1;
+      transform: scale(1.1);
+    }
+    92% {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  @keyframes seal-pile-shrink {
+    0%,
+    8% {
+      opacity: 1;
+    }
+    14%,
+    100% {
+      opacity: 0.85;
+    }
+  }
+  @keyframes seal-pile-grow {
+    0%,
+    76% {
+      transform: scaleY(0.94);
+    }
+    84%,
+    100% {
+      transform: scaleY(1);
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .runner-seal :is(g, rect) {
+      animation: none;
+    }
+    /* Without the throw the sheet would sit mid-air at its start position. */
+    .runner-seal__sheet,
+    .runner-seal__tick {
+      display: none;
+    }
+  }
+
+  /* --- edit mode ----------------------------------------------------------
+     The dashboard is view-only until the user opens an edit session. The layout
+     module then puts .is-editing on the grid, and every affordance that lets a
+     card be moved, resized or switched off hangs off that one class: outside
+     the session there is no grip, no grab cursor and no drag, so a card is just
+     a card and a click on it does what it says.
+
+     .is-sortable is the narrower flag on top of it — the module sets it only
+     once the vendor drag script is really attached, so the grab cursor never
+     promises a drag that cannot happen. It is only ever set inside a session.
+
+     Editing is desktop-only. Below 861px the grid is a single column and every
+     card spans the full width, so the module never opens a session there; the
+     media query at the end of this file takes the bars and the grips off the
+     page as well, so that holds even if the module were never told. */
+
+  .zr-layoutbar {
+    justify-content: flex-end;
+    margin-bottom: var(--zr-2);
+  }
+
+  /* --- the edit tray ------------------------------------------------------
+     Rendered above the grid and unhidden for the session: one chip per card on
+     the left, reset, cancel and done on the right. */
+  .zr-editbar {
+    margin-bottom: var(--zr-3);
+  }
+  .zr-editbar__actions {
+    margin-left: auto;
+  }
+  /* The chip carries its own state: pressed is a card that is on the dashboard
+     and reads normally, unpressed is one that is not and steps back with its
+     label struck through. Two cues rather than a colour, because a colour alone
+     would leave the states indistinguishable to some readers — and because the
+     chips sit next to each other, where a faint one is only obvious in
+     comparison. */
+  .zr-editbar__chip[aria-pressed='false'] {
+    opacity: 0.5;
+  }
+  .zr-editbar__chip[aria-pressed='false'] span {
+    text-decoration: line-through;
+  }
+
+  .zr-grid.is-editing > [data-widget] {
+    position: relative;
+  }
+  /* The head doubles as the drag handle, so it has to say so — but only where
+     the pointer can act on it, and never over the buttons it also holds. */
+  .zr-grid.is-sortable > [data-widget] > .zr-module__head {
+    cursor: grab;
+  }
+  .zr-grid.is-sortable > [data-widget] > .zr-module__head :is(button, a) {
+    cursor: pointer;
+  }
+
+  .zr-module__grip {
+    position: absolute;
+    right: 0;
+    bottom: 0;
+    width: 18px;
+    height: 18px;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: var(--zr-text-faint);
+    cursor: nwse-resize;
+    opacity: 0;
+    transition: opacity var(--zr-dur) var(--zr-ease);
+  }
+  /* Two short strokes in the corner, the conventional resize affordance. */
+  .zr-module__grip::after {
+    content: '';
+    position: absolute;
+    right: 3px;
+    bottom: 3px;
+    width: 9px;
+    height: 9px;
+    border-right: 2px solid currentcolor;
+    border-bottom: 2px solid currentcolor;
+    border-bottom-right-radius: 3px;
+  }
+  /* The grips are in the markup from the moment the module mounts; only the
+     session puts them on screen. display: none also keeps them out of the tab
+     order, which is what makes the keyboard resize path a part of the session
+     rather than a surprise on a page nobody is editing. */
+  .zr-grid:not(.is-editing) .zr-module__grip {
+    display: none;
+  }
+  [data-widget]:hover > .zr-module__grip,
+  .zr-module__grip:focus-visible {
+    opacity: 1;
+  }
+  .zr-module__grip:focus-visible {
+    outline: 2px solid var(--zr-brand);
+    outline-offset: 1px;
+  }
+
+  /* While a card is being dragged or resized the pointer owns it; hover states
+     underneath would only flicker. */
+  .zr-module.is-resizing {
+    user-select: none;
+    box-shadow: var(--zr-shadow-lg);
+  }
+  .zr-module.is-resizing .zr-module__grip {
+    opacity: 1;
+  }
+  .zr-module.is-dragging {
+    box-shadow: var(--zr-shadow-lg);
+    cursor: grabbing;
+  }
+  .zr-module.is-dragghost {
+    opacity: 0.35;
+  }
+
+  /* --- cards the user switched off ----------------------------------------
+     A hidden card keeps its markup and its module instance — the dashboard goes
+     on writing numbers into it — so only these two rules decide whether it is
+     on screen, and they say opposite things on purpose:
+
+     - while reading, the card is not there at all;
+     - while editing, it stays in the grid, faded and outlined, because a card
+       you cannot see is a card you cannot drag to where you want it, and
+       switching it back on has to be possible from the same place.
+
+     The hiding is written as :not(.is-editing) rather than as a display value
+     the session overrides: a card that was given a tile height carries
+     display: flex from the tiles block below, and re-stating a display here
+     would have to guess which one to put back. */
+  .zr-grid:not(.is-editing) > .zr-module.is-hidden {
+    display: none;
+  }
+  .zr-grid.is-editing > .zr-module.is-hidden {
+    opacity: 0.35;
+    outline: 1px dashed var(--zr-line-strong);
+    outline-offset: -1px;
+  }
+
+  /* --- tiles --------------------------------------------------------------
+     A card the user sized behaves like a home-screen widget rather than a
+     document: it keeps the size it was given, shows as much as fits, and never
+     scrolls. Heights come in whole rows so neighbouring cards line up, and the
+     content answers for itself how much detail fits — see the container queries
+     below. Cards nobody resized are untouched and still grow with their
+     content. */
+  .zr-grid {
+    --zr-tile-row: 40px;
+  }
+  /* Cards in a row end on the same line. The framework grid lets each card stop
+     at its own content, which is right for a page that mixes one-off panels;
+     a dashboard of peers reads better squared off. Scoped to this grid so the
+     styleguide's example grids keep the framework behaviour. */
+  .zr-grid[data-module='dashboard-layout'] {
+    align-items: stretch;
+  }
+  .zr-module[data-rows] {
+    display: flex;
+    flex-direction: column;
+    height: calc(
+      var(--zr-rows) * var(--zr-tile-row) + (var(--zr-rows) - 1) * var(--zr-3)
+    );
+    /* A fixed height makes the card a size container, which is what lets the
+       height queries further down apply to exactly these cards. */
+    container-type: size;
+  }
+  .zr-module[data-rows] > * {
+    min-height: 0;
+  }
+  .zr-module[data-rows] > .zr-module__body {
+    flex: 1;
+    overflow: hidden;
+  }
+  .zr-module[data-rows] > .zr-list {
+    overflow: hidden;
+  }
+  /* Whatever did not fit fades out instead of being cut mid-line. The module
+     sets this only on children that actually overflow, so a card whose content
+     fits exactly keeps its last row crisp. */
+  .zr-module[data-rows] > .is-clipped {
+    mask-image: linear-gradient(
+      to bottom,
+      rgba(0, 0, 0, 1) calc(100% - 28px),
+      transparent
+    );
+  }
+
+  /* Content that adapts to the tile it sits in. These only ever match inside a
+     card with a fixed height: a height query cannot match an inline-size
+     container, which is what every other module is. */
+  @container (max-height: 220px) {
+    .zr-module__body {
+      padding-block: var(--zr-2);
+    }
+    .zr-donut {
+      --zr-donut-size: 76px;
+    }
+    .zr-spark {
+      height: 34px;
+    }
+  }
+  @container (max-height: 150px) {
+    .zr-module__head {
+      min-height: 32px;
+    }
+    .zr-donut {
+      --zr-donut-size: 60px;
+    }
+    /* At this height the numbers are the widget; the trend line is decoration
+       and the secondary rows no longer earn their space. */
+    .zr-spark,
+    .zr-module__body .zr-kv:nth-child(n + 3) {
+      display: none;
+    }
+  }
+
+  @media (max-width: 860px) {
+    /* Neither bar has anything to offer on a phone: one column leaves nothing
+       to arrange, so the module never opens a session here. It hides its own
+       button as well — this is the guard that keeps an empty bar from taking up
+       a line if it ever did not. */
+    .zr-layoutbar,
+    .zr-editbar {
+      display: none;
+    }
+    /* And the grips go with them, which makes "no editing here" true from the
+       stylesheet alone: a viewport that reaches this width without the module
+       hearing about it still cannot offer a resize the single column could not
+       honour. */
+    .zr-module__grip {
+      display: none;
+    }
+
+    /* One column, full width: a stored tile height would only cut content off
+       or leave a gap, so it stands down here. */
+    .zr-module[data-rows] {
+      display: block;
+      height: auto;
+      container-type: inline-size;
+    }
+    .zr-module[data-rows] > .zr-module__body,
+    .zr-module[data-rows] > .zr-list {
+      overflow: visible;
+    }
+    .zr-module[data-rows] > .is-clipped {
+      mask-image: none;
+    }
+  }
+}

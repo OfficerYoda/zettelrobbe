@@ -8,19 +8,14 @@
   }
 
   function defaultFormatDate(createdValue) {
-    if (!createdValue) {
-      return 'Unknown date';
-    }
-
-    const parsedDate = new Date(createdValue);
-    if (Number.isNaN(parsedDate.getTime())) {
-      return String(createdValue).slice(0, 10) || 'Unknown date';
-    }
-
-    const year = parsedDate.getFullYear();
-    const month = String(parsedDate.getMonth() + 1).padStart(2, '0');
-    const day = String(parsedDate.getDate()).padStart(2, '0');
-    return `${year}-${month}-${day}`;
+    // A value the formatter cannot parse keeps its leading YYYY-MM-DD rather
+    // than disappearing behind a placeholder — the pill is there to tell two
+    // search hits apart, and half a date still does that.
+    return (
+      window.zrDate.format(createdValue) ||
+      String(createdValue || '').slice(0, 10) ||
+      'Unknown date'
+    );
   }
 
   const DOCUMENT_OMNIBOX_PRESETS = {
@@ -28,7 +23,9 @@
       searchingMessage: 'Searching documents...',
       noResultsMessage: 'No matching documents found.',
       loadErrorMessage: 'Could not load documents. Please try again.',
-      initialStatusMessage: 'Type to search documents...',
+      // Idle keeps the line empty: the input placeholder already says
+      // "Search documents...", and repeating it below reads as noise.
+      initialStatusMessage: '',
       selectedStatusFormatter: (doc) => `Selected: ${defaultGetTitle(doc)}`,
       availableStatusFormatter: () => '',
     },
@@ -36,7 +33,9 @@
       searchingMessage: 'Searching documents...',
       noResultsMessage: 'No matching documents found.',
       loadErrorMessage: 'Could not load documents. Please try again.',
-      initialStatusMessage: 'Type to search documents...',
+      // Idle keeps the line empty: the input placeholder already says
+      // "Search documents...", and repeating it below reads as noise.
+      initialStatusMessage: '',
       selectedStatusFormatter: (doc) => `Selected: ${defaultGetTitle(doc)}`,
       availableStatusFormatter: () => '',
     },
@@ -44,7 +43,9 @@
       searchingMessage: 'Searching documents...',
       noResultsMessage: 'No matching documents found.',
       loadErrorMessage: 'Could not load documents. Please try again.',
-      initialStatusMessage: 'Type to search documents...',
+      // Idle keeps the line empty: the input placeholder already says
+      // "Search documents...", and repeating it below reads as noise.
+      initialStatusMessage: '',
       selectedStatusFormatter: (doc) => `Selected: ${defaultGetTitle(doc)}`,
       availableStatusFormatter: () => '',
     },
@@ -52,7 +53,9 @@
       searchingMessage: 'Searching documents...',
       noResultsMessage: 'No matching documents found.',
       loadErrorMessage: 'Could not load documents. Please try again.',
-      initialStatusMessage: 'Type to search documents...',
+      // Idle keeps the line empty: the input placeholder already says
+      // "Search documents...", and repeating it below reads as noise.
+      initialStatusMessage: '',
       selectedStatusFormatter: (doc) =>
         `Selected: ${defaultGetTitle(doc)} (ID ${doc && doc.id ? doc.id : '-'})`,
       availableStatusFormatter: () => '',
@@ -288,6 +291,9 @@
       if (!normalizedSearchTerm) {
         cancelPendingSearch();
         clearResults();
+        // Back to the idle status, or a stale "No matching documents found."
+        // would outlive the query it belonged to.
+        setStatus(settings.initialStatusMessage, false);
         return;
       }
 

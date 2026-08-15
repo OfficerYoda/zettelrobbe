@@ -11,6 +11,7 @@ const documentModel = require('../models/document.js');
 const AIServiceFactory = require('../services/aiServiceFactory');
 const configFile = require('../config/config.js');
 const changelog = require('../config/changelog.js');
+const dashboardWidgets = require('../config/dashboardWidgets.js');
 const documentsService = require('../services/documentsService.js');
 const fs = require('fs').promises;
 const path = require('path');
@@ -32,6 +33,8 @@ const mistralOcrService = require('../services/mistralOcrService');
 const quickstartService = require('../services/quickstartService');
 const reconciliationService = require('../services/reconciliationService');
 const scanHealthService = require('../services/scanHealthService');
+const updateCheckService = require('../services/updateCheckService');
+const dashboardStatsService = require('../services/dashboardStatsService');
 const {
   THUMBNAIL_CACHE_DIR,
   getThumbnailCachePath,
@@ -3424,6 +3427,11 @@ async function saveDocumentChanges(docId, updateData, analysis, originalData) {
       historyLanguage
     ),
   ]);
+
+  // Document counters and token figures just moved. Every path that writes
+  // processed_documents has to say so, or the dashboard serves numbers from
+  // before the change for up to a full TTL.
+  dashboardStatsService.invalidate();
 }
 
 /**
@@ -3658,6 +3666,172 @@ async function ensureSetupOpenOrRespond(res) {
   return true;
 }
 
+/* The running configuration as a .env file, grouped the way the settings page
+   is. Separate from toEnvPreviewLines() below on purpose: that one previews the
+   handful of values the setup wizard just collected, this one exports
+   everything an operator needs to reproduce the instance elsewhere.
+
+   The list is curated rather than a dump of process.env: the environment also
+   holds the container's own variables, and JWT_SECRET is deliberately absent —
+   a fresh instance mints its own, and putting it on screen buys nothing. */
+const ENV_EXPORT_GROUPS = [
+  {
+    title: 'Paperless-ngx connection',
+    keys: [
+      'PAPERLESS_API_URL',
+      'PAPERLESS_PUBLIC_URL',
+      'PAPERLESS_API_TOKEN',
+      'PAPERLESS_USERNAME',
+      'PAPERLESS_PROBE_INTERVAL_SECONDS',
+      'PAPERLESS_REQUEST_TIMEOUT_SECONDS',
+      'STARTUP_PAPERLESS_RETRY_MINUTES',
+    ],
+  },
+  {
+    title: 'Document processing',
+    keys: [
+      'SCAN_INTERVAL',
+      'DISABLE_AUTOMATIC_PROCESSING',
+      'PROCESS_PREDEFINED_DOCUMENTS',
+      'TAGS',
+      'IGNORE_TAGS',
+      'ADD_AI_PROCESSED_TAG',
+      'AI_PROCESSED_TAG_NAME',
+      'MIN_CONTENT_LENGTH',
+      'USE_EXISTING_DATA',
+    ],
+  },
+  {
+    title: 'AI provider',
+    keys: [
+      'AI_PROVIDER',
+      'OPENAI_API_KEY',
+      'OPENAI_MODEL',
+      'OLLAMA_API_URL',
+      'OLLAMA_API_KEY',
+      'OLLAMA_MODEL',
+      'OLLAMA_THINK',
+      'CUSTOM_BASE_URL',
+      'CUSTOM_API_KEY',
+      'CUSTOM_MODEL',
+      'AZURE_ENDPOINT',
+      'AZURE_API_KEY',
+      'AZURE_DEPLOYMENT_NAME',
+      'AZURE_API_VERSION',
+    ],
+  },
+  {
+    title: 'AI behaviour',
+    keys: [
+      'TOKEN_LIMIT',
+      'RESPONSE_TOKENS',
+      'AI_TEMPERATURE_ANALYSIS',
+      'AI_TEMPERATURE_GENERATION',
+      'SYSTEM_PROMPT',
+      'PROMPT_TAGS',
+      'ACTIVATE_TAGGING',
+      'ACTIVATE_CORRESPONDENTS',
+      'ACTIVATE_DOCUMENT_TYPE',
+      'ACTIVATE_TITLE',
+      'ACTIVATE_CUSTOM_FIELDS',
+      'CUSTOM_FIELDS',
+      'RESTRICT_TO_EXISTING_TAGS',
+      'RESTRICT_TO_EXISTING_CORRESPONDENTS',
+      'RESTRICT_TO_EXISTING_DOCUMENT_TYPES',
+    ],
+  },
+  {
+    title: 'External API',
+    keys: [
+      'EXTERNAL_API_ENABLED',
+      'EXTERNAL_API_URL',
+      'EXTERNAL_API_METHOD',
+      'EXTERNAL_API_HEADERS',
+      'EXTERNAL_API_BODY',
+      'EXTERNAL_API_TIMEOUT',
+      'EXTERNAL_API_TRANSFORM',
+    ],
+  },
+  {
+    title: 'OCR fallback',
+    keys: [
+      'MISTRAL_OCR_ENABLED',
+      'OCR_PROVIDER',
+      'OCR_API_URL',
+      'OCR_API_KEY',
+      'MISTRAL_API_KEY',
+      'MISTRAL_OCR_MODEL',
+      'OCR_PDF_RENDER_ENABLED',
+      'OCR_PDF_RENDER_MAX_PAGES',
+      'OCR_PDF_RENDER_DPI',
+      'OCR_AUTO_PROCESS_ENABLED',
+      'OCR_AUTO_PROCESS_INTERVAL',
+      'OCR_AUTO_PROCESS_BATCH_SIZE',
+      'OCR_AUTO_ANALYZE',
+      'SETUP_OCR_VALIDATION_TIMEOUT_MS',
+    ],
+  },
+  {
+    title: 'Server and security',
+    keys: [
+      'PAPERLESS_AI_PORT',
+      'API_KEY',
+      'TRUST_PROXY',
+      'COOKIE_SECURE_MODE',
+      'GLOBAL_RATE_LIMIT_WINDOW_MS',
+      'GLOBAL_RATE_LIMIT_MAX',
+      'EXPOSE_API_DOCS',
+      'CONFIG_SOURCE_MODE',
+    ],
+  },
+  {
+    title: 'Maintenance',
+    keys: [
+      'LOG_LEVEL',
+      'TAG_CACHE_TTL_SECONDS',
+      'RECONCILIATION_ENABLED',
+      'RECONCILIATION_INTERVAL',
+      'UPDATE_CHECK_ENABLED',
+      'HEALTHCHECK_STRICT',
+      'HEALTH_SCAN_FAILURE_THRESHOLD',
+      'ANONYMIZED_TELEMETRY',
+    ],
+  },
+  {
+    title: 'Interface',
+    keys: ['DATE_FORMAT'],
+  },
+];
+
+/* A value only needs quoting when it carries something a .env parser would
+   otherwise eat — whitespace, a comment marker or a quote of its own. */
+function quoteEnvValue(value) {
+  const text = String(value);
+  if (!/[\s"'#]/.test(text)) return text;
+  return `"${text.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"`;
+}
+
+function buildEnvExport(env = process.env) {
+  const lines = [];
+  let count = 0;
+
+  ENV_EXPORT_GROUPS.forEach((group) => {
+    const present = group.keys.filter(
+      (key) => env[key] !== undefined && String(env[key]).length > 0
+    );
+    if (present.length === 0) return;
+
+    if (lines.length > 0) lines.push('');
+    lines.push(`# ${group.title}`);
+    present.forEach((key) => {
+      lines.push(`${key}=${quoteEnvValue(env[key])}`);
+      count += 1;
+    });
+  });
+
+  return { env: lines.join('\n'), count };
+}
+
 function toEnvPreviewLines(config) {
   const previewKeys = [
     'PAPERLESS_API_URL',
@@ -3762,7 +3936,23 @@ function resolveSettingsAiToken(aiProvider, token) {
   return normalizedToken || resolveStoredAiToken(aiProvider);
 }
 
-function resolveSettingsOcrApiKey(apiKey) {
+/* Accepts what the row menu sends (one id) and what the bulk menu sends (a
+   list), so both reach the same endpoint. Anything that is not a positive
+   whole number is dropped rather than rejected: a selection is assembled from
+   checkboxes, and one stale row should not fail the other forty. */
+function normalizeDocumentIdList(input) {
+  const raw = Array.isArray(input) ? input : [input];
+  const ids = raw
+    .map((value) => Number.parseInt(String(value ?? '').trim(), 10))
+    .filter((value) => Number.isInteger(value) && value > 0);
+
+  return [...new Set(ids)];
+}
+
+/* The key may be typed into the form, saved from an earlier save, or
+   injected through the environment. Only this side can see the last two, which
+   is why neither page refuses an empty field on its own. */
+function resolveOcrApiKey(apiKey) {
   const normalizedApiKey = String(apiKey || '').trim();
   return (
     normalizedApiKey ||
@@ -4802,7 +4992,9 @@ router.post('/api/setup/ocr/models', express.json(), async (req, res) => {
     const result = await discoverOcrModelsForSetup({
       provider: req.body?.provider,
       apiUrl: req.body?.apiUrl,
-      apiKey: req.body?.apiKey,
+      // The wizard used to take the field at face value, so an operator whose
+      // key already sat in the environment was told to supply one.
+      apiKey: resolveOcrApiKey(req.body?.apiKey),
       setupValidationTimeoutMs: req.body?.setupValidationTimeoutMs,
     });
 
@@ -4943,7 +5135,7 @@ router.post(
         enabled: req.body?.enabled,
         provider: req.body?.provider,
         apiUrl: req.body?.apiUrl,
-        apiKey: resolveSettingsOcrApiKey(req.body?.apiKey),
+        apiKey: resolveOcrApiKey(req.body?.apiKey),
         model: req.body?.model,
         setupOcrValidationTimeoutMs:
           req.body?.setupOcrValidationTimeoutMs ??
@@ -5010,7 +5202,7 @@ router.post(
       const result = await discoverOcrModelsForSetup({
         provider: req.body?.provider,
         apiUrl: req.body?.apiUrl,
-        apiKey: resolveSettingsOcrApiKey(req.body?.apiKey),
+        apiKey: resolveOcrApiKey(req.body?.apiKey),
         setupOcrValidationTimeoutMs:
           req.body?.setupOcrValidationTimeoutMs ??
           req.body?.setupValidationTimeoutMs,
@@ -5089,6 +5281,13 @@ router.post(
  * /api/setup/complete:
  *   post:
  *     summary: Finalize initial setup, persist env config, and trigger restart
+ *     description: >
+ *       Validates the Paperless, AI and OCR connections before writing the
+ *       configuration. The boolean body flags paperlessTestPassed, aiTestPassed
+ *       and ocrTestPassed let a caller that has just verified a connection with
+ *       these exact values skip the matching probe; anything not flagged is
+ *       validated here. allowFailedPaperlessTest and allowFailedAiTest still
+ *       accept a connection whose validation failed.
  *     tags:
  *       - Setup
  *     responses:
@@ -5163,6 +5362,19 @@ router.post('/api/setup/complete', express.json(), async (req, res) => {
       false
     );
 
+    // The wizard reports which connections it already proved reachable with
+    // exactly the values being submitted (it drops the flag as soon as one of
+    // them is edited). Honouring that spares the user a second wait — and a
+    // second billed AI call — for probes they just watched succeed. Anything
+    // not reported as passing is still validated below.
+    const paperlessTestPassed = parseBooleanInput(
+      req.body?.paperlessTestPassed,
+      false
+    );
+    const aiTestPassed = parseBooleanInput(req.body?.aiTestPassed, false);
+    const ocrTestPassed = parseBooleanInput(req.body?.ocrTestPassed, false);
+    const alreadyVerified = { success: true, message: 'Verified by setup.' };
+
     const mistralOcrEnabled = parseBooleanInput(
       req.body?.mistralOcrEnabled,
       false
@@ -5233,10 +5445,9 @@ router.post('/api/setup/complete', express.json(), async (req, res) => {
       });
     }
 
-    const paperlessValidation = await validatePaperlessConnectionForSetup(
-      paperlessUrl,
-      paperlessToken
-    );
+    const paperlessValidation = paperlessTestPassed
+      ? alreadyVerified
+      : await validatePaperlessConnectionForSetup(paperlessUrl, paperlessToken);
     if (!paperlessValidation.success && !allowFailedPaperlessTest) {
       return res.status(400).json({
         success: false,
@@ -5244,14 +5455,16 @@ router.post('/api/setup/complete', express.json(), async (req, res) => {
       });
     }
 
-    const aiValidation = await validateAiConnectionForSetup({
-      aiProvider,
-      apiUrl: aiApiUrl,
-      token: aiToken,
-      model: aiModel,
-      azureApiVersion: aiAzureApiVersion,
-      setupValidationTimeoutMs,
-    });
+    const aiValidation = aiTestPassed
+      ? alreadyVerified
+      : await validateAiConnectionForSetup({
+          aiProvider,
+          apiUrl: aiApiUrl,
+          token: aiToken,
+          model: aiModel,
+          azureApiVersion: aiAzureApiVersion,
+          setupValidationTimeoutMs,
+        });
 
     if (!aiValidation.success && !allowFailedAiTest) {
       return res.status(400).json({
@@ -5262,14 +5475,16 @@ router.post('/api/setup/complete', express.json(), async (req, res) => {
 
     const ocrProviderForValidation =
       ocrProvider === 'custom' ? 'ollama' : ocrProvider;
-    const ocrValidation = await validateOcrConnectionForSetup({
-      enabled: mistralOcrEnabled ? 'yes' : 'no',
-      provider: ocrProviderForValidation,
-      apiUrl: ocrApiUrl,
-      apiKey: ocrApiKey,
-      model: mistralOcrModel,
-      setupOcrValidationTimeoutMs,
-    });
+    const ocrValidation = ocrTestPassed
+      ? alreadyVerified
+      : await validateOcrConnectionForSetup({
+          enabled: mistralOcrEnabled ? 'yes' : 'no',
+          provider: ocrProviderForValidation,
+          apiUrl: ocrApiUrl,
+          apiKey: ocrApiKey,
+          model: mistralOcrModel,
+          setupOcrValidationTimeoutMs,
+        });
 
     if (!ocrValidation.success) {
       return res.status(400).json({
@@ -6150,137 +6365,19 @@ router.get('/dashboard', async (req, res) => {
     },
     version,
     paperlessUrl,
+    // The cards the view loops over. Which widgets ship, in which order and how
+    // wide, is the registry's business — the view only renders what it is given.
+    dashboardWidgets,
   });
 });
 
+// The payload itself is assembled in dashboardStatsService and cached there:
+// this endpoint is polled by every open dashboard, and rebuilding it per
+// request meant two Paperless-ngx round trips plus a dozen queries each time.
 router.get('/api/dashboard/stats', async (req, res) => {
   try {
-    const [
-      tagCount,
-      correspondentCount,
-      documentCount,
-      rawProcessedDocumentCount,
-      ocrNeededCount,
-      ocrFailedCount,
-      processingFailedCount,
-      metrics,
-      processingTimeStats,
-      tokenDistribution,
-      documentTypes,
-      tokenTrend,
-      recentActivity,
-      languageDistribution,
-      processingStatus,
-    ] = await Promise.all([
-      paperlessService.getTagCount(),
-      paperlessService.getCorrespondentCount(),
-      paperlessService.getEffectiveDocumentCount(),
-      documentModel.getProcessedDocumentsCount(),
-      documentModel.getOcrQueueCount(),
-      documentModel.getOcrFailedCount(),
-      documentModel.getFailedProcessingCount(),
-      documentModel.getMetrics(),
-      documentModel.getProcessingTimeStats(),
-      documentModel.getTokenDistribution(),
-      documentModel.getDocumentTypeStats(),
-      documentModel.getTokenTrend(7),
-      documentModel.getRecentHistoryDocuments(3),
-      documentModel.getLanguageDistribution(5),
-      documentModel.getCurrentProcessingStatus(),
-    ]);
-
-    const processedDocumentCount = rawProcessedDocumentCount;
-    const failedCount = ocrFailedCount + processingFailedCount;
-    const queueBacklog = Math.max(0, ocrNeededCount + failedCount);
-    const processingAttemptCount = processedDocumentCount + failedCount;
-    const processingEfficiencyRate =
-      processingAttemptCount > 0
-        ? Math.round((processedDocumentCount / processingAttemptCount) * 100)
-        : 0;
-    const failedRate =
-      processingAttemptCount > 0
-        ? Math.round((failedCount / processingAttemptCount) * 100)
-        : 0;
-    const processedToday = Number(processingStatus?.processedToday || 0);
-
-    const averagePromptTokens =
-      metrics.length > 0
-        ? Math.round(
-            metrics.reduce((acc, cur) => acc + cur.promptTokens, 0) /
-              metrics.length
-          )
-        : 0;
-    const averageCompletionTokens =
-      metrics.length > 0
-        ? Math.round(
-            metrics.reduce((acc, cur) => acc + cur.completionTokens, 0) /
-              metrics.length
-          )
-        : 0;
-    const averageTotalTokens =
-      metrics.length > 0
-        ? Math.round(
-            metrics.reduce((acc, cur) => acc + cur.totalTokens, 0) /
-              metrics.length
-          )
-        : 0;
-    const tokensOverall =
-      metrics.length > 0
-        ? metrics.reduce((acc, cur) => acc + cur.totalTokens, 0)
-        : 0;
-
-    const normalizedTokenTrend = Array.isArray(tokenTrend)
-      ? tokenTrend.map((entry) => ({
-          day: entry.day,
-          documents: Number(entry.documents || 0),
-          totalTokens: Number(entry.totalTokens || 0),
-        }))
-      : [];
-
-    const normalizedRecentActivity = Array.isArray(recentActivity)
-      ? recentActivity.map((entry) => ({
-          documentId: Number(entry.documentId || 0),
-          title: entry.title || 'Untitled document',
-          correspondent: entry.correspondent || 'Unknown correspondent',
-          createdAt: entry.createdAt,
-          language: entry.language || 'Unknown',
-        }))
-      : [];
-
-    const normalizedLanguageDistribution = Array.isArray(languageDistribution)
-      ? languageDistribution.map((entry) => ({
-          language: entry.language || 'Unknown',
-          count: Number(entry.count || 0),
-        }))
-      : [];
-
-    res.json({
-      success: true,
-      paperless_data: {
-        tagCount,
-        correspondentCount,
-        documentCount,
-        processedDocumentCount,
-        ocrNeededCount,
-        failedCount,
-        queueBacklog,
-        processingEfficiencyRate,
-        failedRate,
-        processedToday,
-        processingTimeStats,
-        tokenDistribution,
-        documentTypes,
-        tokenTrend: normalizedTokenTrend,
-        recentActivity: normalizedRecentActivity,
-        languageDistribution: normalizedLanguageDistribution,
-      },
-      openai_data: {
-        averagePromptTokens,
-        averageCompletionTokens,
-        averageTotalTokens,
-        tokensOverall,
-      },
-    });
+    const { payload, cachedAt } = await dashboardStatsService.getStats();
+    res.json({ ...payload, cachedAt });
   } catch (error) {
     console.error('[ERROR] loading dashboard stats:', error);
     res
@@ -6294,7 +6391,14 @@ router.get('/api/dashboard/stats', async (req, res) => {
  * /api/dashboard/stats:
  *   get:
  *     summary: Get dashboard statistics payload
- *     description: Returns all aggregate counters and chart datasets required by the dashboard UI.
+ *     description: |
+ *       Returns all aggregate counters and chart datasets required by the dashboard UI.
+ *
+ *       The payload is served from an in-memory cache instead of being rebuilt per
+ *       request. It is refreshed in the background (once a minute, plus after every
+ *       scan run) and expires after STATS_CACHE_TTL_SECONDS (default 60). The scan
+ *       loop invalidates it for every document it processes, so figures follow
+ *       processing without polling Paperless-ngx on every request.
  *     tags:
  *       - System
  *       - API
@@ -6308,6 +6412,21 @@ router.get('/api/dashboard/stats', async (req, res) => {
  *           application/json:
  *             schema:
  *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 cachedAt:
+ *                   type: integer
+ *                   format: int64
+ *                   description: >-
+ *                     Epoch milliseconds at which the returned payload was assembled.
+ *                     0 when the assembly time is unknown.
+ *                 paperless_data:
+ *                   type: object
+ *                   description: Aggregate counters and chart datasets.
+ *                 openai_data:
+ *                   type: object
+ *                   description: Token averages and the overall token total.
  *       500:
  *         description: Server error
  */
@@ -6508,6 +6627,7 @@ router.get('/settings', async (req, res) => {
     MIN_CONTENT_LENGTH: process.env.MIN_CONTENT_LENGTH || '10',
     PAPERLESS_AI_PORT: process.env.PAPERLESS_AI_PORT || '3000',
     LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+    DATE_FORMAT: process.env.DATE_FORMAT || 'DD.MM.YYYY',
   };
 
   if (isConfigured) {
@@ -6589,9 +6709,9 @@ router.get('/settings', async (req, res) => {
     aiProviderPresets,
     mfaSettings,
     changelogReleases: changelog.releases,
-    success: isConfigured
-      ? 'The application is already configured. You can update the configuration below.'
-      : undefined,
+    // No banner for the normal case: "already configured" was shown on every
+    // visit to a configured instance, i.e. always, and said nothing.
+    success: undefined,
     settingsError: showErrorCheckSettings
       ? 'Please check your settings. Something is not working correctly.'
       : undefined,
@@ -7635,6 +7755,7 @@ router.post('/manual/updateDocument', express.json(), async (req, res) => {
 
     // Mark document as processed
     await documentModel.addProcessedDocument(documentId, updateData.title);
+    dashboardStatsService.invalidate();
 
     res.json(updateDocument);
   } catch (error) {
@@ -7869,7 +7990,8 @@ router.get('/health', async (req, res) => {
  *                 example: 128000
  *               responseTokens:
  *                 type: integer
- *                 description: The approx. amount of tokens required for the response
+ *                 minimum: 1
+ *                 description: Tokens a provider may spend on its answer. Reserved in the context window and sent as the generation limit (num_predict for Ollama, max_tokens elsewhere). Rejected with 400 when it is not a positive whole number.
  *                 example: 1000
  *               aiTemperatureAnalysis:
  *                 type: number
@@ -7947,6 +8069,11 @@ router.get('/health', async (req, res) => {
  *                 type: string
  *                 description: Run AI analysis directly after automatic OCR (yes/no)
  *                 example: "yes"
+ *               dateFormat:
+ *                 type: string
+ *                 description: How every date in the web interface is rendered
+ *                 enum: ["DD.MM.YYYY", "YYYY-MM-DD"]
+ *                 example: "DD.MM.YYYY"
  *     responses:
  *       200:
  *         description: Settings updated successfully
@@ -8057,6 +8184,7 @@ router.post('/settings', express.json(), async (req, res) => {
       paperlessAiPort,
       externalApiAllowPrivateIps,
       logLevel,
+      dateFormat,
     } = req.body;
 
     //replace equal char in system prompt
@@ -8155,6 +8283,7 @@ router.post('/settings', express.json(), async (req, res) => {
       MIN_CONTENT_LENGTH: process.env.MIN_CONTENT_LENGTH || '10',
       PAPERLESS_AI_PORT: process.env.PAPERLESS_AI_PORT || '3000',
       LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+      DATE_FORMAT: process.env.DATE_FORMAT || 'DD.MM.YYYY',
     };
 
     const hasValue = (value) =>
@@ -8428,7 +8557,21 @@ router.post('/settings', express.json(), async (req, res) => {
         .replace(/\n/g, '\\n');
     if (showTags) updatedConfig.PROCESS_PREDEFINED_DOCUMENTS = showTags;
     if (tokenLimit) updatedConfig.TOKEN_LIMIT = tokenLimit;
-    if (responseTokens) updatedConfig.RESPONSE_TOKENS = responseTokens;
+    if (responseTokens) {
+      // Validated here rather than left to the loader's fallback: the value is
+      // a generation limit now, and an operator who mistypes it should be told
+      // so while the form is still on screen.
+      const parsedResponseTokens = Number.parseInt(
+        String(responseTokens).trim(),
+        10
+      );
+      if (!Number.isFinite(parsedResponseTokens) || parsedResponseTokens < 1) {
+        return res.status(400).json({
+          error: 'Invalid Response Tokens. Expected a positive whole number.',
+        });
+      }
+      updatedConfig.RESPONSE_TOKENS = String(parsedResponseTokens);
+    }
     if (aiTemperatureAnalysis !== undefined) {
       updatedConfig.AI_TEMPERATURE_ANALYSIS = sanitizeTemperatureValue(
         aiTemperatureAnalysis,
@@ -8612,6 +8755,19 @@ router.post('/settings', express.json(), async (req, res) => {
       } else {
         return res.status(400).json({
           error: 'Invalid Log Level. Allowed values: debug, info, warn, error.',
+        });
+      }
+    }
+    if (typeof dateFormat === 'string') {
+      // Upper-cased before the comparison because the value doubles as the
+      // pattern it describes — an operator typing dd.mm.yyyy into the .env file
+      // means the same thing the select does.
+      const normalizedDateFormat = dateFormat.trim().toUpperCase();
+      if (['DD.MM.YYYY', 'YYYY-MM-DD'].includes(normalizedDateFormat)) {
+        updatedConfig.DATE_FORMAT = normalizedDateFormat;
+      } else {
+        return res.status(400).json({
+          error: 'Invalid Date Format. Allowed values: DD.MM.YYYY, YYYY-MM-DD.',
         });
       }
     }
@@ -8833,6 +8989,11 @@ router.get('/ocr', protectApiRoute, async (req, res) => {
     return res.render('ocr', {
       version: configFile.PAPERLESS_AI_VERSION || ' ',
       ocrEnabled: configFile.mistralOcr?.enabled === 'yes',
+      // Same reading as ocrAutoProcessService.autoAnalyze, so the checkbox
+      // starts where OCR_AUTO_ANALYZE stands and the button does what the
+      // scheduled drain does. It used to start unchecked regardless, which
+      // made the same queue behave differently depending on who ran it.
+      ocrAutoAnalyze: configFile.mistralOcr?.autoAnalyze !== 'no',
     });
   } catch (error) {
     console.error('[ERROR] OCR page:', error);
@@ -9154,67 +9315,81 @@ router.get('/api/ocr/queue/ids', isAuthenticated, async (req, res) => {
   }
 });
 
-// API: Add a document manually to OCR queue
+// API: Add one or more documents manually to the OCR queue
 router.post('/api/ocr/queue/add', isAuthenticated, async (req, res) => {
   try {
-    const { documentId } = req.body;
-    if (documentId === undefined || documentId === null || documentId === '') {
+    const rawInput = req.body.documentIds ?? req.body.documentId;
+    if (rawInput === undefined || rawInput === null || rawInput === '') {
       return res
         .status(400)
         .json({ success: false, error: 'documentId is required' });
     }
 
-    const normalizedDocumentId = String(documentId).trim();
-    if (!/^\d+$/.test(normalizedDocumentId)) {
+    const documentIds = normalizeDocumentIdList(rawInput);
+    if (!documentIds.length) {
       return res.status(400).json({
         success: false,
         error: 'documentId must be a positive integer',
       });
     }
 
-    const docIdNum = Number(normalizedDocumentId);
-    if (!Number.isInteger(docIdNum) || docIdNum <= 0) {
-      return res.status(400).json({
-        success: false,
-        error: 'documentId must be a positive integer',
-      });
-    }
+    const single = documentIds.length === 1;
+    let added = 0;
+    const missing = [];
 
-    let doc;
-    try {
-      doc = await paperlessService.getDocument(docIdNum);
-    } catch (error) {
-      if (error.response?.status === 404) {
-        return res.status(404).json({
-          success: false,
-          error: `Document ${docIdNum} was not found in Paperless-ngx`,
-        });
+    for (const docIdNum of documentIds) {
+      let doc;
+      try {
+        doc = await paperlessService.getDocument(docIdNum);
+      } catch (error) {
+        if (error.response?.status === 404) {
+          doc = null;
+        } else {
+          throw error;
+        }
       }
-      throw error;
+
+      if (!doc || !Number.isInteger(Number(doc.id))) {
+        // One document that has since been deleted in Paperless-ngx must not
+        // cost the rest of the selection its place in the queue.
+        if (single) {
+          return res.status(404).json({
+            success: false,
+            error: `Document ${docIdNum} was not found in Paperless-ngx`,
+          });
+        }
+        missing.push(docIdNum);
+        continue;
+      }
+
+      const title =
+        typeof doc.title === 'string' && doc.title.trim()
+          ? doc.title.trim()
+          : `Document ${docIdNum}`;
+
+      if (await documentModel.addToOcrQueue(docIdNum, title, 'manual')) {
+        added += 1;
+      }
     }
 
-    if (!doc || !Number.isInteger(Number(doc.id))) {
-      return res.status(404).json({
-        success: false,
-        error: `Document ${docIdNum} was not found in Paperless-ngx`,
-      });
-    }
-
-    const title =
-      typeof doc.title === 'string' && doc.title.trim()
-        ? doc.title.trim()
-        : `Document ${docIdNum}`;
-
-    const added = await documentModel.addToOcrQueue(docIdNum, title, 'manual');
-    if (!added) {
+    if (single && !added) {
       return res.json({
         success: false,
         message: 'Document already in queue or could not be added',
       });
     }
+
+    const skipped = documentIds.length - added - missing.length;
     return res.json({
       success: true,
-      message: `Document ${docIdNum} added to OCR queue`,
+      added,
+      skipped,
+      missing,
+      message: single
+        ? `Document ${documentIds[0]} added to OCR queue`
+        : `${added} document(s) added to the OCR queue` +
+          (skipped ? `, ${skipped} already queued` : '') +
+          (missing.length ? `, ${missing.length} not found` : ''),
     });
   } catch (error) {
     console.error('[ERROR] POST /api/ocr/queue/add:', error);
@@ -9239,12 +9414,21 @@ router.post('/api/ocr/queue/add', isAuthenticated, async (req, res) => {
  *         application/json:
  *           schema:
  *             type: object
- *             required:
- *               - documentId
+ *             description: One of documentId or documentIds is required.
  *             properties:
  *               documentId:
  *                 type: integer
  *                 minimum: 1
+ *                 description: A single document, as the row menu sends it.
+ *               documentIds:
+ *                 type: array
+ *                 description: |
+ *                   A selection, as the bulk menu sends it. Documents that are
+ *                   already queued are counted as skipped and ones missing from
+ *                   Paperless-ngx are listed, rather than failing the batch.
+ *                 items:
+ *                   type: integer
+ *                   minimum: 1
  *     responses:
  *       200:
  *         description: Add operation result
@@ -9350,6 +9534,7 @@ router.post(
           send({ step, message, ...data });
         },
       });
+      dashboardStatsService.invalidate();
     } catch (error) {
       send({ step: 'error', message: error.message });
     }
@@ -9450,6 +9635,7 @@ router.post('/api/ocr/process-all', isAuthenticated, async (req, res) => {
           },
         });
         completed++;
+        dashboardStatsService.invalidate();
       } catch (err) {
         failed++;
         send({
@@ -9653,6 +9839,14 @@ router.get('/api/ocr/stats', isAuthenticated, async (req, res) => {
       pending: allItems.filter((i) => i.status === 'pending').length,
       processing: allItems.filter((i) => i.status === 'processing').length,
       done: allItems.filter((i) => i.status === 'done').length,
+      // Counted separately rather than folded into "done": these are the items
+      // Paperless-ngx refused the content for, so this queue entry is the only
+      // place their OCR text exists. Items completed before the wrote_back
+      // column existed carry null and stay out of this count — their outcome
+      // was never recorded.
+      notWrittenBack: allItems.filter(
+        (i) => i.status === 'done' && i.wrote_back === 0
+      ).length,
       failed: allItems.filter((i) => i.status === 'failed').length,
       permanentlyFailed: failedDocs.total || 0,
       ignored: ignoredCount,
@@ -9849,11 +10043,69 @@ router.get('/api/ignored/queue', isAuthenticated, async (req, res) => {
   }
 });
 
-// API: Add a document to the ignored list
+/**
+ * @swagger
+ * /api/ignored/add:
+ *   post:
+ *     summary: Add one or more documents to the ignored list
+ *     description: |
+ *       Ignored documents are skipped by every future scan. Accepts a single
+ *       id from the history row menu or a selection from its bulk menu; a
+ *       document that was already ignored counts as skipped rather than an
+ *       error.
+ *     tags:
+ *       - Documents
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             description: One of documentId or documentIds is required.
+ *             properties:
+ *               documentId:
+ *                 type: integer
+ *                 minimum: 1
+ *               documentIds:
+ *                 type: array
+ *                 items:
+ *                   type: integer
+ *                   minimum: 1
+ *               title:
+ *                 type: string
+ *                 description: Stored with a single document; ignored for a selection.
+ *               reason:
+ *                 type: string
+ *                 default: manual
+ *     responses:
+ *       200:
+ *         description: How many were added and how many were already ignored
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 added:
+ *                   type: integer
+ *                 skipped:
+ *                   type: integer
+ *                 message:
+ *                   type: string
+ *       400:
+ *         description: No usable document id in the payload
+ */
+// API: Add one or more documents to the ignored list
 router.post('/api/ignored/add', isAuthenticated, async (req, res) => {
   try {
-    const documentId = parseInt(req.body.documentId, 10);
-    if (isNaN(documentId)) {
+    const documentIds = normalizeDocumentIdList(
+      req.body.documentIds ?? req.body.documentId
+    );
+    if (!documentIds.length) {
       return res
         .status(400)
         .json({ success: false, error: 'Invalid document ID' });
@@ -9862,16 +10114,29 @@ router.post('/api/ignored/add', isAuthenticated, async (req, res) => {
     const title = req.body.title || '';
     const reason = req.body.reason || 'manual';
 
-    const added = await documentModel.addIgnoredDocument(
-      documentId,
-      title,
-      reason
-    );
+    let added = 0;
+    for (const documentId of documentIds) {
+      // The title belongs to one document, so it only travels when one was
+      // asked for; a bulk call lets the model fall back to what it knows.
+      const wasAdded = await documentModel.addIgnoredDocument(
+        documentId,
+        documentIds.length === 1 ? title : '',
+        reason
+      );
+      if (wasAdded) added += 1;
+    }
+
+    const skipped = documentIds.length - added;
     return res.json({
       success: true,
-      message: added
-        ? `Document ${documentId} added to ignored list.`
-        : `Document ${documentId} was already ignored.`,
+      added,
+      skipped,
+      message:
+        documentIds.length === 1
+          ? added
+            ? `Document ${documentIds[0]} added to ignored list.`
+            : `Document ${documentIds[0]} was already ignored.`
+          : `${added} document(s) added to ignored list${skipped ? `, ${skipped} already ignored` : ''}.`,
     });
   } catch (error) {
     console.error('[ERROR] POST /api/ignored/add:', error);
@@ -9964,6 +10229,68 @@ router.post(
 
 /**
  * @swagger
+ * /api/update-check:
+ *   get:
+ *     summary: Report whether a newer release is available
+ *     description: |
+ *       Compares the running version against the latest GitHub release tag.
+ *
+ *       The lookup happens on the server and its result is cached for 24 hours,
+ *       so browsers never contact GitHub themselves and a busy instance makes at
+ *       most one outbound request per day. Set `UPDATE_CHECK_ENABLED=no` to turn
+ *       the outbound call off; the endpoint then reports `enabled: false`.
+ *     tags:
+ *       - System
+ *       - API
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: Update status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     enabled:
+ *                       type: boolean
+ *                     currentVersion:
+ *                       type: string
+ *                     latestVersion:
+ *                       type: string
+ *                       nullable: true
+ *                     updateAvailable:
+ *                       type: boolean
+ *                     checkedAt:
+ *                       type: string
+ *                       format: date-time
+ *                       nullable: true
+ *       401:
+ *         description: Not authenticated
+ */
+router.get('/api/update-check', isAuthenticated, async (req, res) => {
+  try {
+    const status = await updateCheckService.getStatus();
+    // The upstream error message is for the server log, not for the browser.
+    const data = { ...status };
+    delete data.error;
+    return res.json({ success: true, data });
+  } catch (error) {
+    console.error('[ERROR] GET /api/update-check:', error);
+    return res
+      .status(500)
+      .json({ success: false, error: 'Failed to check for updates' });
+  }
+});
+
+/**
+ * @swagger
  * /api/changelog/status:
  *   get:
  *     summary: Check whether the What's New modal should be shown
@@ -10044,5 +10371,457 @@ router.post('/api/changelog/mark-seen', isAuthenticated, async (req, res) => {
       .json({ success: false, error: 'Failed to mark changelog as seen' });
   }
 });
+
+/**
+ * @swagger
+ * /api/settings/env-file:
+ *   get:
+ *     summary: Export the running configuration as a .env file
+ *     description: >
+ *       Returns the instance's configuration as .env lines, grouped by topic
+ *       and covering only variables that are actually set. Intended for moving
+ *       an instance or pinning its settings into docker-compose. The body
+ *       contains API tokens and keys in clear text; JWT_SECRET is deliberately
+ *       excluded, since a fresh instance generates its own.
+ *     tags:
+ *       - System
+ *     security:
+ *       - BearerAuth: []
+ *       - ApiKeyAuth: []
+ *     responses:
+ *       200:
+ *         description: The configuration as .env text
+ *       401:
+ *         description: Not authenticated
+ */
+router.get('/api/settings/env-file', isAuthenticated, async (req, res) => {
+  try {
+    const { env, count } = buildEnvExport();
+    return res.json({
+      success: true,
+      data: { env, count, generatedAt: new Date().toISOString() },
+    });
+  } catch (error) {
+    console.error('[ERROR] GET /api/settings/env-file:', error);
+    return res
+      .status(500)
+      .json({ success: false, error: 'Failed to build the configuration' });
+  }
+});
+
+/* Dashboard storage format v1.
+   ---------------------------
+   The dashboard sends back the boards the user arranged:
+
+     {
+       version: 1,
+       active: 'default',
+       dashboards: [
+         {
+           slug: 'default',
+           name: 'Dashboard',
+           widgets: [{ id: 'task-runner', span: 12, rows: 0, hidden: false }]
+         }
+       ]
+     }
+
+   This blob goes straight into users.dashboard_layout, so the validator below
+   is the only thing between a hostile payload and the database. It rejects
+   whole configurations rather than repairing them: a payload it cannot vouch
+   for is a bug or an attack, and storing the salvageable half of either is
+   worse than a 400.
+
+   Widget and dashboard ids are deliberately not checked against a list. The
+   dashboard adds and renames cards, and a stale server-side list would silently
+   drop a card's placement; the shape, the spans and the counts are what has to
+   be trustworthy. Anything the browser no longer knows is ignored when the
+   layout is applied.
+
+   Two conventions run through the whole format:
+
+   - Absent means "use the defaults". No stored config, an empty dashboards
+     list, and a dashboard without widgets all say the same thing: render the
+     cards the way the server shipped them, in registry order.
+   - active is a pointer, not data. A slug that no longer resolves — a deleted
+     board, a stale client — falls back to the first dashboard instead of
+     failing the write. The arrangement is the valuable part, and landing on
+     board one beats losing it to a 400 over a name. */
+const DASHBOARD_WIDGET_ID = /^[a-z0-9][a-z0-9-]{0,39}$/;
+const DASHBOARD_MAX_WIDGETS = 50;
+const DASHBOARD_MIN_SPAN = 3;
+const DASHBOARD_GRID_COLUMNS = 12;
+const DASHBOARD_MIN_ROWS = 3;
+const DASHBOARD_MAX_ROWS = 24;
+const DASHBOARD_CONFIG_VERSION = 1;
+const DASHBOARD_MAX_BOARDS = 10;
+const DASHBOARD_MAX_NAME_LENGTH = 60;
+const DASHBOARD_DEFAULT_SLUG = 'default';
+
+/* Nothing stored: a valid v1 config that asks for the defaults. */
+function emptyDashboardConfig() {
+  return {
+    version: DASHBOARD_CONFIG_VERSION,
+    active: DASHBOARD_DEFAULT_SLUG,
+    dashboards: [],
+  };
+}
+
+/* One board's cards, cleaned. Returns null — not a partial list — as soon as
+   anything is off, so a single bad card takes the whole write down with it. */
+function normalizeDashboardWidgets(input) {
+  if (!Array.isArray(input)) {
+    return null;
+  }
+  if (input.length > DASHBOARD_MAX_WIDGETS) {
+    return null;
+  }
+
+  const seen = new Set();
+  const widgets = [];
+  for (const entry of input) {
+    const id = String(entry?.id || '').trim();
+    if (!DASHBOARD_WIDGET_ID.test(id) || seen.has(id)) {
+      return null;
+    }
+    seen.add(id);
+
+    // span and rows are parsed rather than compared: they are read off DOM
+    // datasets in the browser, where everything is a string.
+    const span = Number.parseInt(entry?.span, 10);
+    if (
+      !Number.isInteger(span) ||
+      span < DASHBOARD_MIN_SPAN ||
+      span > DASHBOARD_GRID_COLUMNS
+    ) {
+      return null;
+    }
+
+    // Tile rows. 0 means "as tall as the content needs", which is the default
+    // and the only value outside the 3..24 range a card may carry.
+    const rows = Number.parseInt(entry?.rows, 10) || 0;
+    if (
+      rows !== 0 &&
+      (rows < DASHBOARD_MIN_ROWS || rows > DASHBOARD_MAX_ROWS)
+    ) {
+      return null;
+    }
+
+    // hidden is a toggle, not data: absent, null or anything falsy means the
+    // card is shown. Nothing to reject here, so nothing does.
+    widgets.push({ id, span, rows, hidden: Boolean(entry?.hidden) });
+  }
+
+  return widgets;
+}
+
+/* "Give me the defaults back" arrives in two shapes: no boards at all, or the
+   single board the reset button empties. Both clear the stored config. More
+   than one board is left alone — an empty board among several is a named view
+   that happens to show the default cards, and dropping its name would be the
+   opposite of what the user asked for. */
+function isDashboardResetRequest(input) {
+  if (!input || !Array.isArray(input.dashboards)) {
+    return false;
+  }
+  if (input.dashboards.length === 0) {
+    return true;
+  }
+  return (
+    input.dashboards.length === 1 &&
+    Array.isArray(input.dashboards[0]?.widgets) &&
+    input.dashboards[0].widgets.length === 0
+  );
+}
+
+function normalizeDashboardConfig(input) {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) {
+    return null;
+  }
+  // Strict: version is written by our own code, never typed into a form, so a
+  // string '1' is a bug worth surfacing rather than a value worth coercing.
+  if (input.version !== DASHBOARD_CONFIG_VERSION) {
+    return null;
+  }
+  if (!Array.isArray(input.dashboards)) {
+    return null;
+  }
+  if (
+    input.dashboards.length < 1 ||
+    input.dashboards.length > DASHBOARD_MAX_BOARDS
+  ) {
+    return null;
+  }
+
+  const slugs = new Set();
+  const dashboards = [];
+  for (const entry of input.dashboards) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) {
+      return null;
+    }
+
+    // Slugs are ids, so they answer to the widget-id rules: lowercase, no
+    // markup, short enough to live in a URL.
+    const slug = String(entry.slug || '').trim();
+    if (!DASHBOARD_WIDGET_ID.test(slug) || slugs.has(slug)) {
+      return null;
+    }
+    slugs.add(slug);
+
+    // The name is what the user typed, so it is trimmed first and then has to
+    // still say something. It is escaped where it is rendered, not here.
+    const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+    if (name.length < 1 || name.length > DASHBOARD_MAX_NAME_LENGTH) {
+      return null;
+    }
+
+    // A board without widgets is the default arrangement under a name, so a
+    // missing list is the same as an empty one. A non-array is not.
+    const widgets = normalizeDashboardWidgets(
+      entry.widgets === undefined || entry.widgets === null ? [] : entry.widgets
+    );
+    if (!widgets) {
+      return null;
+    }
+
+    dashboards.push({ slug, name, widgets });
+  }
+
+  const requested = String(input.active || '').trim();
+  const active = slugs.has(requested) ? requested : dashboards[0].slug;
+
+  return { version: DASHBOARD_CONFIG_VERSION, active, dashboards };
+}
+
+/**
+ * @swagger
+ * /api/dashboard/layout:
+ *   get:
+ *     summary: Read the authenticated user's dashboard configuration
+ *     description: >
+ *       Returns the stored configuration in storage format v1: the named
+ *       dashboards the user arranged, each with its widgets in display order,
+ *       and the slug of the active one. An empty dashboards list means nothing
+ *       has been customised and every board renders in its default order — the
+ *       same answer a user without a stored configuration gets.
+ *     tags:
+ *       - Dashboard
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200:
+ *         description: The stored configuration
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success:
+ *                   type: boolean
+ *                   example: true
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     version:
+ *                       type: integer
+ *                       example: 1
+ *                     active:
+ *                       type: string
+ *                       description: Slug of the dashboard currently shown
+ *                       example: "default"
+ *                     dashboards:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           slug:
+ *                             type: string
+ *                             example: "default"
+ *                           name:
+ *                             type: string
+ *                             example: "Dashboard"
+ *                           widgets:
+ *                             type: array
+ *                             items:
+ *                               type: object
+ *                               properties:
+ *                                 id:
+ *                                   type: string
+ *                                   example: "task-runner"
+ *                                 span:
+ *                                   type: integer
+ *                                   description: Width in grid columns, 3 to 12
+ *                                   example: 12
+ *                                 rows:
+ *                                   type: integer
+ *                                   description: Height in tile rows, 3 to 24, or 0 for as tall as the content
+ *                                   example: 0
+ *                                 hidden:
+ *                                   type: boolean
+ *                                   example: false
+ *       401:
+ *         description: Not authenticated
+ */
+router.get('/api/dashboard/layout', isAuthenticated, async (req, res) => {
+  try {
+    const username = req.user && req.user.username;
+    if (!username) {
+      return res.json({ success: true, data: emptyDashboardConfig() });
+    }
+
+    const stored = await documentModel.getDashboardLayout(username);
+    // What was stored was validated on the way in, so it is handed back as it
+    // is. Only the shape is checked: this is an unreleased feature, and a blob
+    // in an older shape is a development leftover that should quietly fall back
+    // to the defaults rather than reach the browser.
+    const dashboardConfig =
+      stored &&
+      stored.version === DASHBOARD_CONFIG_VERSION &&
+      Array.isArray(stored.dashboards)
+        ? stored
+        : emptyDashboardConfig();
+
+    return res.json({ success: true, data: dashboardConfig });
+  } catch (error) {
+    console.error('[ERROR] GET /api/dashboard/layout:', error);
+    return res
+      .status(500)
+      .json({ success: false, error: 'Failed to load dashboard layout' });
+  }
+});
+
+/**
+ * @swagger
+ * /api/dashboard/layout:
+ *   put:
+ *     summary: Store or reset the authenticated user's dashboard configuration
+ *     description: >
+ *       Takes a complete configuration in storage format v1 and replaces the
+ *       stored one; there is no partial update. Up to 10 dashboards, each with
+ *       a slug, a name of 1 to 60 characters and up to 50 widgets in display
+ *       order. Widget spans are 3 to 12 grid columns; rows are 3 to 24 tile
+ *       rows, or 0 for a card that is as tall as its content. A dashboard
+ *       without widgets shows the default arrangement under its own name.
+ *
+ *       Two payloads reset instead of storing: an empty dashboards array, and a
+ *       single dashboard whose widgets array is empty. Both clear the stored
+ *       configuration, so every board returns to its default order. Emptying
+ *       one board out of several does not reset — that board simply shows the
+ *       defaults and keeps its name.
+ *
+ *       If active names a dashboard that is not in the payload it is replaced
+ *       with the first dashboard's slug rather than rejecting the write.
+ *     tags:
+ *       - Dashboard
+ *     security:
+ *       - BearerAuth: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               version:
+ *                 type: integer
+ *                 enum: [1]
+ *                 example: 1
+ *               active:
+ *                 type: string
+ *                 description: Slug of the dashboard to show
+ *                 example: "default"
+ *               dashboards:
+ *                 type: array
+ *                 maxItems: 10
+ *                 items:
+ *                   type: object
+ *                   required:
+ *                     - slug
+ *                     - name
+ *                   properties:
+ *                     slug:
+ *                       type: string
+ *                       pattern: "^[a-z0-9][a-z0-9-]{0,39}$"
+ *                       example: "default"
+ *                     name:
+ *                       type: string
+ *                       minLength: 1
+ *                       maxLength: 60
+ *                       example: "Dashboard"
+ *                     widgets:
+ *                       type: array
+ *                       maxItems: 50
+ *                       items:
+ *                         type: object
+ *                         required:
+ *                           - id
+ *                           - span
+ *                         properties:
+ *                           id:
+ *                             type: string
+ *                             pattern: "^[a-z0-9][a-z0-9-]{0,39}$"
+ *                             example: "task-runner"
+ *                           span:
+ *                             type: integer
+ *                             minimum: 3
+ *                             maximum: 12
+ *                             example: 12
+ *                           rows:
+ *                             type: integer
+ *                             description: 3 to 24 tile rows, or 0 for as tall as the content
+ *                             example: 0
+ *                           hidden:
+ *                             type: boolean
+ *                             default: false
+ *     responses:
+ *       200:
+ *         description: Configuration stored or reset
+ *       400:
+ *         description: Malformed configuration
+ *       401:
+ *         description: Not authenticated
+ */
+router.put(
+  '/api/dashboard/layout',
+  isAuthenticated,
+  express.json(),
+  async (req, res) => {
+    try {
+      const username = req.user && req.user.username;
+      if (!username) {
+        return res.json({ success: true, message: 'No user to store against' });
+      }
+
+      // Nothing arranged is not stored as "an empty arrangement": the row is
+      // cleared, so the dashboard falls back to the registry order.
+      if (isDashboardResetRequest(req.body)) {
+        await documentModel.setDashboardLayout(username, null);
+        return res.json({
+          success: true,
+          data: emptyDashboardConfig(),
+          message: 'Dashboard layout reset',
+        });
+      }
+
+      const dashboardConfig = normalizeDashboardConfig(req.body);
+      if (!dashboardConfig) {
+        return res
+          .status(400)
+          .json({ success: false, error: 'Invalid dashboard layout' });
+      }
+
+      await documentModel.setDashboardLayout(username, dashboardConfig);
+      return res.json({
+        success: true,
+        data: dashboardConfig,
+        message: 'Dashboard layout saved',
+      });
+    } catch (error) {
+      console.error('[ERROR] PUT /api/dashboard/layout:', error);
+      return res
+        .status(500)
+        .json({ success: false, error: 'Failed to save dashboard layout' });
+    }
+  }
+);
 
 module.exports = router;

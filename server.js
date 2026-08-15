@@ -16,6 +16,7 @@ const mistralOcrService = require('./services/mistralOcrService');
 const ocrAutoProcessService = require('./services/ocrAutoProcessService');
 const reconciliationService = require('./services/reconciliationService');
 const scanHealthService = require('./services/scanHealthService');
+const dashboardStatsService = require('./services/dashboardStatsService');
 const { RUN_STATUS } = scanHealthService;
 const cors = require('cors');
 const cookieParser = require('cookie-parser');
@@ -320,6 +321,7 @@ app.use((req, res, next) => {
   res.locals.appServerTimeUtc = new Date().toISOString();
   res.locals.appServerTimezone =
     Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+  res.locals.appDateFormat = config.dateFormat || 'DD.MM.YYYY';
   res.locals.appPaperlessApiUrl = config.paperless?.apiUrl || 'unknown';
   res.locals.appOllamaApiUrl = config.ollama?.apiUrl || 'unknown';
   res.locals.appOllamaModel = config.ollama?.model || 'unknown';
@@ -423,6 +425,41 @@ app.use((req, res, next) => {
     res.locals.csrfToken = generateCsrfToken(req, res);
     next();
   });
+});
+
+/**
+ * @swagger
+ * /api/csrf-token:
+ *   get:
+ *     summary: Issue a CSRF token for the current browser
+ *     description: |
+ *       Returns a token paired with the CSRF cookie this response sets, for a
+ *       page whose own token has gone stale.
+ *
+ *       A token is minted per page render and the cookie it pairs with belongs
+ *       to the browser, not the tab — so a second tab, a navigation, or the
+ *       restart after saving settings leaves every older tab holding a token
+ *       the server no longer accepts. /js/csrf.js calls this after a rejected
+ *       request and repeats the request once.
+ *
+ *       Deliberately unauthenticated: the login form needs the same recovery,
+ *       and a token is only usable together with the cookie sent alongside it.
+ *     tags:
+ *       - System
+ *     responses:
+ *       200:
+ *         description: A token matching the cookie set on this response
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 csrfToken:
+ *                   type: string
+ *                   example: "e3b0c44298fc1c14…"
+ */
+app.get('/api/csrf-token', (req, res) => {
+  res.json({ csrfToken: generateCsrfToken(req, res) });
 });
 
 app.use(['/api', '/manual'], apiGlobalLimiter);
@@ -713,7 +750,9 @@ async function processDocument(
       await documentModel.addFailedDocument(
         doc.id,
         doc.title,
-        'ai_failed_ocr_disabled',
+        // A service that knows exactly why it gave up says so; everything else
+        // keeps the generic reason this branch has always recorded.
+        analysis.errorCode || 'ai_failed_ocr_disabled',
         'ai'
       );
       retryTracker.delete(doc.id);
@@ -723,7 +762,7 @@ async function processDocument(
       await documentModel.addFailedDocument(
         doc.id,
         doc.title,
-        'ai_failed_without_ocr_fallback',
+        analysis.errorCode || 'ai_failed_without_ocr_fallback',
         'ai'
       );
       retryTracker.delete(doc.id);
@@ -1074,9 +1113,16 @@ async function scanDocuments(source = 'scheduler') {
         await saveDocumentChanges(doc.id, updateData, analysis, originalData);
         await documentModel.setProcessingStatus(doc.id, doc.title, 'complete');
         scanStats.processed += 1;
+        // The document counters and token figures just changed. Marking the
+        // cache stale costs nothing here; the next dashboard poll pays for the
+        // rebuild, so a long scan does not rebuild once per document.
+        dashboardStatsService.invalidate();
       } catch (error) {
         await documentModel.setProcessingStatus(doc.id, doc.title, 'failed');
         scanStats.failed += 1;
+        // A failure moves the failed counter and the failure rate, which the
+        // dashboard shows just as prominently as the successes.
+        dashboardStatsService.invalidate();
         console.error(
           `[ERROR] processing document ${doc.id}: ${error.message}`
         );
@@ -1109,11 +1155,70 @@ async function scanDocuments(source = 'scheduler') {
     scanControl.source = null;
     scanControl.startedAt = null;
     scanControl.stopRequestedAt = null;
+
+    // Rebuild once the run is over so the first dashboard poll after a scan
+    // reads finished numbers instead of paying for the assembly itself.
+    // Detached: nothing in the scan depends on it, and an unhandled rejection
+    // would take the process down.
+    dashboardStatsService.refresh().catch((error) => {
+      console.debug(
+        `[DASHBOARD-STATS] Refresh after scan failed: ${error.message}`
+      );
+    });
   }
 }
 
 // Routes
 app.use('/', setupRoutes);
+
+// Development-only reference page for the zr UI framework. It ships no product
+// behaviour, only one sample of every component, so it is not registered in a
+// production build and is deliberately absent from the navigation.
+if (process.env.NODE_ENV !== 'production') {
+  /**
+   * @swagger
+   * /styleguide:
+   *   get:
+   *     summary: UI framework styleguide page (development builds only)
+   *     description: |
+   *       Renders one sample of every zr framework component. The route is only
+   *       registered when `NODE_ENV` is not `production`; a production build
+   *       answers this path with the generic 404 handler.
+   *     tags:
+   *       - Navigation
+   *     security:
+   *       - BearerAuth: []
+   *       - ApiKeyAuth: []
+   *     responses:
+   *       200:
+   *         description: Styleguide page rendered successfully
+   *         content:
+   *           text/html:
+   *             schema:
+   *               type: string
+   *       302:
+   *         description: Redirect to login when authentication is missing or invalid
+   *         headers:
+   *           Location:
+   *             schema:
+   *               type: string
+   *               example: /login
+   *       404:
+   *         description: Route not registered because the app runs in production
+   *       500:
+   *         description: Server error
+   */
+  app.get('/styleguide', isAuthenticated, async (req, res) => {
+    try {
+      return res.render('styleguide', {
+        version: config.PAPERLESS_AI_VERSION || ' ',
+      });
+    } catch (error) {
+      console.error('[ERROR] Styleguide page:', error);
+      return res.status(500).json({ success: false, error: error.message });
+    }
+  });
+}
 
 /**
  * @swagger
@@ -1341,6 +1446,32 @@ async function startScanning() {
         '[RECONCILIATION] Automatic reconciliation is disabled (RECONCILIATION_ENABLED=no).'
       );
     }
+
+    // Dashboard statistics are cached, and the cache is kept warm from here so
+    // no visitor ever waits for the assembly. Armed before the automatic
+    // processing kill-switch below on purpose: the dashboard is served (and
+    // polled) whether or not scanning is enabled.
+    if (isConfigured) {
+      dashboardStatsService.refresh().catch((error) => {
+        console.debug(`[DASHBOARD-STATS] Warmup failed: ${error.message}`);
+      });
+    }
+
+    cron.schedule('* * * * *', async () => {
+      // Never compete with a running scan for the Paperless API — the scan
+      // invalidates the cache per document anyway, and the run end refreshes it.
+      if (scanControl.running) {
+        return;
+      }
+      if (!(await setupService.isConfigured())) {
+        return;
+      }
+      await dashboardStatsService.refresh().catch((error) => {
+        console.debug(
+          `[DASHBOARD-STATS] Scheduled refresh failed: ${error.message}`
+        );
+      });
+    });
 
     if (config.disableAutomaticProcessing === 'yes') {
       scanHealthService.markAutomaticProcessingDisabled();

@@ -30,6 +30,25 @@ const LOG_LEVEL_WEIGHTS = {
 };
 const VALID_LOG_LEVELS = Object.keys(LOG_LEVEL_WEIGHTS);
 
+/* The date formats the interface offers. A locale's own idea of the order is
+   deliberately not among them: the dates sit in dense table cells without a
+   label, and an unadorned 08/09 has to mean one thing whoever is reading. Both
+   formats pad the month and day to two digits for the same reason — a column of
+   15.08.2026 and 3.9.2026 does not scan. */
+const VALID_DATE_FORMATS = ['DD.MM.YYYY', 'YYYY-MM-DD'];
+const DEFAULT_DATE_FORMAT = 'DD.MM.YYYY';
+
+const normalizeDateFormat = (value) => {
+  if (!value) {
+    return DEFAULT_DATE_FORMAT;
+  }
+
+  const normalized = String(value).trim().toUpperCase();
+  return VALID_DATE_FORMATS.includes(normalized)
+    ? normalized
+    : DEFAULT_DATE_FORMAT;
+};
+
 const normalizeLogLevel = (value) => {
   if (!value) {
     return 'info';
@@ -205,6 +224,24 @@ if (
   );
 }
 process.env.LOG_LEVEL = logLevel;
+
+/* Written back onto the environment so the settings view and the .env export,
+   which both read process.env directly, show the value the app actually renders
+   with rather than the typo an operator left behind. */
+const requestedDateFormat = process.env.DATE_FORMAT;
+const dateFormat = normalizeDateFormat(requestedDateFormat);
+if (
+  requestedDateFormat &&
+  String(requestedDateFormat).trim().toUpperCase() !== dateFormat
+) {
+  startupLog(
+    logLevel,
+    'warn',
+    `[WARN] Invalid DATE_FORMAT "${requestedDateFormat}". Falling back to "${dateFormat}".`
+  );
+}
+process.env.DATE_FORMAT = dateFormat;
+
 if (CONFIG_SOURCE_MODE === LEGACY_CONFIG_SOURCE_MODE) {
   startupLog(logLevel, 'debug', 'Loading legacy .env from:', envPath);
 } else {
@@ -243,6 +280,30 @@ const parseTemperature = (value, defaultValue, envKey) => {
       logLevel,
       'warn',
       `[WARN] Out-of-range ${envKey} value "${normalizedValue}". Falling back to ${defaultValue}.`
+    );
+    return defaultValue;
+  }
+
+  return parsed;
+};
+
+/* Token counts arrive as unvalidated environment strings and used to be read
+   with a bare Number() at each of the nine call sites. That was harmless while
+   the value only ever entered an addition — a NaN reservation just made the
+   context window NaN, which Ollama ignores. It stopped being harmless once the
+   value became a generation limit: "num_predict": null is a typo away. */
+const parseTokenCount = (value, defaultValue, envKey) => {
+  const normalizedValue = String(value ?? '').trim();
+  if (!normalizedValue) {
+    return defaultValue;
+  }
+
+  const parsed = Number.parseInt(normalizedValue, 10);
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    startupLog(
+      logLevel,
+      'warn',
+      `[WARN] Invalid ${envKey} value "${normalizedValue}". Falling back to ${defaultValue}.`
     );
     return defaultValue;
   }
@@ -352,7 +413,7 @@ startupLog(logLevel, 'info', 'Configuration loaded:', {
 });
 
 module.exports = {
-  PAPERLESS_AI_VERSION: 'v2026.08.02',
+  PAPERLESS_AI_VERSION: 'v2026.08.03',
   CONFIGURED: false,
   configSourceMode: CONFIG_SOURCE_MODE,
   getApiKey,
@@ -373,8 +434,16 @@ module.exports = {
     return getCookieSecureMode();
   },
   logLevel,
+  // How every date in the interface is rendered. The browser gets it through a
+  // <meta> tag in the shell, so one setting covers server-rendered pages and
+  // the tables the page scripts build alike.
+  dateFormat,
+  validDateFormats: VALID_DATE_FORMATS,
   disableAutomaticProcessing: process.env.DISABLE_AUTOMATIC_PROCESSING || 'no',
   exposeApiDocs: parseEnvBoolean(process.env.EXPOSE_API_DOCS, 'no'),
+  // Contacts api.github.com once a day to compare release tags. Set to `no` in
+  // air-gapped installations or wherever the outbound call is unwanted.
+  updateCheckEnabled: parseEnvBoolean(process.env.UPDATE_CHECK_ENABLED, 'yes'),
   globalRateLimitWindowMs: parseInt(
     process.env.GLOBAL_RATE_LIMIT_WINDOW_MS || '900000',
     10
@@ -383,7 +452,14 @@ module.exports = {
   predefinedMode: process.env.PROCESS_PREDEFINED_DOCUMENTS,
   ignoreTags: process.env.IGNORE_TAGS || '',
   tokenLimit: process.env.TOKEN_LIMIT || 128000,
-  responseTokens: process.env.RESPONSE_TOKENS || 1000,
+  // How many tokens a provider may spend on its answer. Reserved in the
+  // context window and, where the provider offers a knob for it, sent as the
+  // generation limit — num_predict for Ollama, max_tokens for the rest.
+  responseTokens: parseTokenCount(
+    process.env.RESPONSE_TOKENS,
+    1000,
+    'RESPONSE_TOKENS'
+  ),
   // Minimum extracted-text length before a document is sent to AI analysis.
   // Documents below this are skipped or routed to OCR fallback. Default 10.
   minContentLength: parseInt(process.env.MIN_CONTENT_LENGTH || '10', 10),
@@ -412,6 +488,15 @@ module.exports = {
       .replace(/\/+$/, '')
       .replace(/\/api$/i, ''),
     apiToken: process.env.PAPERLESS_API_TOKEN,
+    // Deadline for every single Paperless-ngx request. Axios ships with no
+    // timeout at all, so a host that accepts the connection and then goes
+    // quiet — a Paperless-ngx container that is still booting, which is
+    // exactly what a restart looks like — left the request pending for the
+    // lifetime of the process. Set to 0 to restore the unlimited behaviour.
+    requestTimeoutSeconds: parseInt(
+      process.env.PAPERLESS_REQUEST_TIMEOUT_SECONDS || '30',
+      10
+    ),
   },
   openai: {
     apiKey: process.env.OPENAI_API_KEY,
@@ -519,6 +604,12 @@ module.exports = {
   // Cache configuration (in seconds)
   // Recommended: 300 (5 min) for balanced performance, 60-900 (1-15 min) for custom needs
   tagCacheTTL: parseInt(process.env.TAG_CACHE_TTL_SECONDS || '300', 10),
+  // How long the assembled dashboard statistics payload stays valid. The
+  // dashboard polls its stats endpoint, so without this every poll of every
+  // open tab paid for two Paperless-ngx round trips and a dozen queries. The
+  // scan loop invalidates the cache as it processes documents, so a low value
+  // buys little beyond faster reaction to changes made outside this app.
+  statsCacheTTL: parseInt(process.env.STATS_CACHE_TTL_SECONDS || '60', 10),
   // Add limit functions to config
   limitFunctions: {
     activateTagging: limitFunctions.activateTagging,

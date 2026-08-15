@@ -1,4 +1,4 @@
-/* global Swal */
+/* global zrDialog */
 class SetupWizard {
   constructor() {
     this.bootstrap = window.__SETUP_BOOTSTRAP__ || {};
@@ -8,13 +8,17 @@ class SetupWizard {
       ? this.bootstrap.aiProviderPresets
       : [];
 
-    this.steps = Array.from(document.querySelectorAll('.setup-step'));
+    this.steps = Array.from(document.querySelectorAll('.zr-steppane'));
     this.stepLabel = document.getElementById('setupStepLabel');
     this.progressFill = document.getElementById('setupProgressFill');
+    this.progressBar = document.getElementById('setupProgressBar');
     this.prevBtn = document.getElementById('prevStepBtn');
     this.nextBtn = document.getElementById('nextStepBtn');
 
     this.currentStep = 0;
+    // Which steps the user actually cleared. Kept separately from currentStep
+    // so paging back never discards a completed step.
+    this.completedSteps = new Set();
     this.includeTags = [];
     this.excludeTags = [];
 
@@ -24,22 +28,28 @@ class SetupWizard {
       setupStarted: false,
     };
 
+    // `signature` records the values a green test actually ran against, so
+    // finalize can tell the server which probes it may skip — see
+    // connectionSignatures() for why a bare success flag is not enough.
     this.paperlessTestState = {
       ran: false,
       success: false,
       allowFailure: false,
+      signature: '',
     };
 
     this.aiTestState = {
       ran: false,
       success: false,
       allowFailure: false,
+      signature: '',
     };
 
     this.ocrTestState = {
       ran: false,
       success: false,
       allowFailure: false,
+      signature: '',
     };
 
     this.metadataState = {
@@ -82,7 +92,6 @@ class SetupWizard {
     this.testPaperlessBtn = document.getElementById('testPaperlessBtn');
     this.paperlessTestStatePill = document.getElementById('paperlessTestState');
 
-    this.fetchMetadataBtn = document.getElementById('fetchMetadataBtn');
     this.metadataLoadStatePill = document.getElementById('metadataLoadState');
     this.documentsCount = document.getElementById('documentsCount');
     this.correspondentsCount = document.getElementById('correspondentsCount');
@@ -90,6 +99,7 @@ class SetupWizard {
     this.scanAllDocuments = document.getElementById('scanAllDocuments');
     this.includeTag = document.getElementById('includeTag');
     this.addIncludeTagBtn = document.getElementById('addIncludeTagBtn');
+    this.includeTagsSection = document.getElementById('includeTagsSection');
     this.includeTagsContainer = document.getElementById('includeTagsContainer');
     this.excludeTagInput = document.getElementById('excludeTagInput');
     this.addExcludeTagBtn = document.getElementById('addExcludeTagBtn');
@@ -159,9 +169,13 @@ class SetupWizard {
     this.updateMfaPanelVisibility();
     this.toggleIncludeTagField();
     this.toggleMistralFields();
-    // Fresh installs start in quickstart mode; existing configs open in
-    // manual mode so their loaded values stay visible.
-    this.setAiConfigMode(this.config.AI_PROVIDER ? 'manual' : 'quickstart');
+    // Auto-detection is the default path; manual configuration is a choice the
+    // user makes. This used to read `this.config.AI_PROVIDER ? 'manual' : …`,
+    // which never once picked quickstart: the setup route fills AI_PROVIDER
+    // with 'openai' when the environment has none, so the flag was always set.
+    // Values loaded from an existing config are not lost — they sit in the
+    // manual panel, one click away.
+    this.setAiConfigMode('quickstart');
     this.showStep(0);
   }
 
@@ -198,6 +212,9 @@ class SetupWizard {
       this.config.SCAN_INTERVAL || this.defaults.scanInterval || '*/30 * * * *';
     this.scanAllDocuments.checked =
       this.config.PROCESS_PREDEFINED_DOCUMENTS === 'no';
+    // Re-entering setup with an existing configuration has to apply the switch,
+    // otherwise it reads "scan all" while the include field is still shown.
+    this.toggleIncludeTagField();
     this.includeTags = Array.isArray(this.config.TAGS)
       ? this.config.TAGS.slice()
       : [];
@@ -370,6 +387,15 @@ class SetupWizard {
   bindEvents() {
     this.prevBtn.addEventListener('click', () => this.goToPreviousStep());
     this.nextBtn.addEventListener('click', () => this.goToNextStep());
+
+    // The rail entries are <button>s and have always looked clickable; wire
+    // them up so that affordance is real for the steps already cleared.
+    document
+      .querySelectorAll('[data-step-marker]')
+      .forEach((marker, markerIndex) => {
+        marker.addEventListener('click', () => this.goToStep(markerIndex));
+      });
+
     this.setModelSelectOptions(this.aiModel, [], 'Select model');
 
     this.adminPassword.addEventListener('input', () =>
@@ -427,9 +453,6 @@ class SetupWizard {
 
     this.testPaperlessBtn.addEventListener('click', () =>
       this.testPaperlessConnection()
-    );
-    this.fetchMetadataBtn.addEventListener('click', () =>
-      this.loadPaperlessMetadata()
     );
 
     this.testAiBtn.addEventListener('click', () => this.testAiConnection());
@@ -529,26 +552,8 @@ class SetupWizard {
     selectElement.value = unique.length > 0 ? unique[0] : '';
   }
 
-  getPopupThemeOptions() {
-    return {
-      customClass: {
-        popup: 'setup-swal-popup',
-        title: 'setup-swal-title',
-        htmlContainer: 'setup-swal-html',
-        actions: 'setup-swal-actions',
-        confirmButton: 'setup-swal-confirm',
-        cancelButton: 'setup-swal-cancel',
-      },
-      buttonsStyling: false,
-      backdrop: 'rgba(2, 6, 23, 0.72)',
-    };
-  }
-
   showPopup(options = {}) {
-    return Swal.fire({
-      ...this.getPopupThemeOptions(),
-      ...options,
-    });
+    return zrDialog(options);
   }
 
   isTimeoutMessage(message) {
@@ -597,11 +602,53 @@ class SetupWizard {
     });
 
     this.currentStep = index;
+
+    document
+      .querySelectorAll('[data-step-marker]')
+      .forEach((marker, markerIndex) => {
+        // Completion is remembered, not derived from the position, so paging
+        // back does not turn finished steps back into pending ones.
+        const status =
+          markerIndex === index
+            ? 'active'
+            : this.completedSteps.has(markerIndex)
+              ? 'done'
+              : 'todo';
+        marker.dataset.status = status;
+
+        const number = marker.querySelector('[data-marker-text]');
+        const check = marker.querySelector('[data-marker-check]');
+        // `hidden` is an HTMLElement property — assigning it on an <svg> does
+        // nothing, which is why the check mark never appeared. Drive the
+        // attribute directly so both elements behave the same.
+        if (number) number.toggleAttribute('hidden', status === 'done');
+        if (check) check.toggleAttribute('hidden', status !== 'done');
+
+        // Finished steps are reachable again; pending ones are not.
+        const reachable = status === 'done' || status === 'active';
+        marker.disabled = !reachable;
+        marker.setAttribute('aria-disabled', String(!reachable));
+        if (status === 'active') {
+          marker.setAttribute('aria-current', 'step');
+        } else {
+          marker.removeAttribute('aria-current');
+        }
+      });
+
     this.prevBtn.disabled = index === 0;
     this.nextBtn.classList.toggle('hidden', index === this.steps.length - 1);
 
-    const progressPercent = ((index + 1) / this.steps.length) * 100;
+    // Progress reflects completed work, not the step you happen to be looking
+    // at — reaching the review step is not the same as having finished it.
+    const progressPercent =
+      (this.completedSteps.size / this.steps.length) * 100;
     this.progressFill.style.width = `${progressPercent}%`;
+    if (this.progressBar) {
+      this.progressBar.setAttribute(
+        'aria-valuenow',
+        String(Math.round(progressPercent))
+      );
+    }
 
     const stepTitle =
       this.steps[index].dataset.stepTitle || `Step ${index + 1}`;
@@ -612,12 +659,19 @@ class SetupWizard {
     }
   }
 
+  markStepCompleted(index) {
+    if (index >= 0 && index < this.steps.length) {
+      this.completedSteps.add(index);
+    }
+  }
+
   async goToNextStep() {
     const canContinue = await this.validateStepBeforeContinue(this.currentStep);
     if (!canContinue) {
       return;
     }
 
+    this.markStepCompleted(this.currentStep);
     this.showStep(this.currentStep + 1);
   }
 
@@ -625,30 +679,52 @@ class SetupWizard {
     this.showStep(this.currentStep - 1);
   }
 
+  // Jumping is only allowed to steps already cleared, so validation can never
+  // be skipped by clicking ahead in the rail.
+  goToStep(index) {
+    if (index === this.currentStep) {
+      return;
+    }
+    if (!this.completedSteps.has(index)) {
+      return;
+    }
+    this.showStep(index);
+  }
+
   updatePasswordHint() {
     const password = this.adminPassword.value;
     const confirmPassword = this.confirmPassword.value;
 
     if (!password) {
-      this.passwordHint.textContent = 'Use at least 8 characters.';
-      this.passwordHint.className = 'setup-hint';
+      this.setHintState(this.passwordHint, null, 'Use at least 8 characters.');
       return;
     }
 
     if (password.length < 8) {
-      this.passwordHint.textContent = 'Password is too short.';
-      this.passwordHint.className = 'setup-hint setup-hint-error';
+      this.setHintState(this.passwordHint, 'error', 'Password is too short.');
       return;
     }
 
     if (confirmPassword && password !== confirmPassword) {
-      this.passwordHint.textContent = 'Passwords do not match.';
-      this.passwordHint.className = 'setup-hint setup-hint-error';
+      this.setHintState(this.passwordHint, 'error', 'Passwords do not match.');
       return;
     }
 
-    this.passwordHint.textContent = 'Password looks good.';
-    this.passwordHint.className = 'setup-hint setup-hint-success';
+    this.setHintState(this.passwordHint, 'success', 'Password looks good.');
+  }
+
+  // Keeps the framework's hint styling and only swaps the state colour on top.
+  setHintState(element, type, text) {
+    if (!element) {
+      return;
+    }
+    element.textContent = text;
+    element.className = 'zr-field__hint';
+    if (type === 'success') {
+      element.classList.add('zr-ok-text');
+    } else if (type === 'error') {
+      element.classList.add('zr-danger-text');
+    }
   }
 
   updateMfaPanelVisibility() {
@@ -659,14 +735,26 @@ class SetupWizard {
       this.mfaState.verified = false;
       this.mfaState.setupStarted = false;
       this.mfaStatusHint.textContent = '';
-      this.mfaStatusHint.className = 'setup-hint';
+      this.mfaStatusHint.className = 'zr-field__hint';
       this.mfaProvisioningBox.classList.add('hidden');
     }
   }
 
+  // With "scan all documents" on, an include filter is ignored entirely, so the
+  // whole block goes away instead of leaving a dead field with a live Add
+  // button next to it. Chips already collected are kept, not cleared: toggling
+  // the switch back restores them, and they are not submitted while it is on.
   toggleIncludeTagField() {
     const scanAll = this.scanAllDocuments.checked;
+
+    if (this.includeTagsSection) {
+      this.includeTagsSection.classList.toggle('hidden', scanAll);
+    }
+
     this.includeTag.disabled = scanAll;
+    if (this.addIncludeTagBtn) {
+      this.addIncludeTagBtn.disabled = scanAll;
+    }
     if (scanAll) {
       this.includeTag.value = '';
     }
@@ -711,27 +799,43 @@ class SetupWizard {
 
     if (tags.length === 0) {
       const hint = document.createElement('p');
-      hint.className = 'setup-hint';
+      hint.className = 'zr-field__hint';
       hint.textContent = 'No include tags selected.';
       this.includeTagsContainer.appendChild(hint);
       return;
     }
 
     tags.forEach((tag) => {
-      const chip = document.createElement('div');
-      chip.className =
-        'bg-blue-100 text-blue-800 px-3 py-1 rounded-full flex items-center gap-2';
-      chip.innerHTML = `<span>${tag}</span>`;
-
-      const removeBtn = document.createElement('button');
-      removeBtn.type = 'button';
-      removeBtn.className = 'hover:text-blue-600';
-      removeBtn.innerHTML = '<i class="fas fa-times"></i>';
-      removeBtn.addEventListener('click', () => this.removeIncludeTag(tag));
-
-      chip.appendChild(removeBtn);
-      this.includeTagsContainer.appendChild(chip);
+      this.includeTagsContainer.appendChild(
+        this.createTagChip(tag, () => this.removeIncludeTag(tag))
+      );
     });
+  }
+
+  // One chip shape for both tag lists. Tag names are user input, so the label
+  // goes in as a text node rather than through innerHTML.
+  createTagChip(tag, onRemove) {
+    const chip = document.createElement('div');
+    chip.className = 'zr-chip';
+
+    const label = document.createElement('span');
+    label.textContent = tag;
+    chip.appendChild(label);
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.setAttribute('aria-label', `Remove tag ${tag}`);
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute('class', 'zr-icon zr-icon--sm');
+    icon.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', '/icons.svg#i-x');
+    icon.appendChild(use);
+    removeBtn.appendChild(icon);
+    removeBtn.addEventListener('click', onRemove);
+
+    chip.appendChild(removeBtn);
+    return chip;
   }
 
   toggleMistralFields() {
@@ -777,6 +881,7 @@ class SetupWizard {
       this.setPillState(this.ocrTestStatePill, 'success', 'Disabled (skipped)');
       this.ocrTestState.ran = true;
       this.ocrTestState.success = true;
+      this.ocrTestState.signature = this.connectionSignatures().ocr;
       return;
     }
 
@@ -785,12 +890,18 @@ class SetupWizard {
 
     try {
       const result = await this.request('/api/setup/ocr/test', payload);
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.testOcrBtn, false);
       this.ocrTestState.ran = true;
       this.ocrTestState.success = Boolean(result.success);
 
       if (result.resolvedApiUrl && this.ocrApiUrl) {
         this.ocrApiUrl.value = String(result.resolvedApiUrl).trim();
       }
+      // After the resolved URL is written back, so the signature describes the
+      // endpoint that was actually reached.
+      this.ocrTestState.signature = this.connectionSignatures().ocr;
 
       if (result.success) {
         this.setPillState(this.ocrTestStatePill, 'success', 'Connection valid');
@@ -833,14 +944,19 @@ class SetupWizard {
   }
 
   setPillState(element, type, text) {
+    if (!element) {
+      return;
+    }
     element.textContent = text;
-    element.className = 'setup-pill';
+    // The markup ships these as .zr-badge; rebuild that base every time so the
+    // badge keeps its shape and only the state colour changes.
+    element.className = 'zr-badge';
     if (type === 'success') {
-      element.classList.add('setup-pill-success');
+      element.classList.add('zr-badge--ok');
     } else if (type === 'error') {
-      element.classList.add('setup-pill-error');
+      element.classList.add('zr-badge--danger');
     } else if (type === 'loading') {
-      element.classList.add('setup-pill-loading');
+      element.classList.add('zr-badge--info');
     }
   }
 
@@ -850,7 +966,7 @@ class SetupWizard {
         button.dataset.originalHtml = button.innerHTML;
       }
       button.disabled = true;
-      button.innerHTML = `<i class="fas fa-spinner fa-spin"></i> ${loadingText}`;
+      button.innerHTML = `<svg class="zr-icon zr-icon--sm zr-icon--spin" aria-hidden="true"><use href="/icons.svg#i-refresh"/></svg> ${loadingText}`;
       return;
     }
 
@@ -891,6 +1007,9 @@ class SetupWizard {
     this.setButtonLoading(this.startMfaSetupBtn, true, 'Generating...');
     try {
       const result = await this.request('/api/setup/mfa/setup', { username });
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.startMfaSetupBtn, false);
       this.mfaState.challengeId = result.challengeId;
       this.mfaState.setupStarted = true;
       this.mfaState.verified = false;
@@ -902,7 +1021,7 @@ class SetupWizard {
 
       this.mfaStatusHint.textContent =
         'Scan the QR code and confirm with a current authentication code.';
-      this.mfaStatusHint.className = 'setup-hint';
+      this.mfaStatusHint.className = 'zr-field__hint';
     } catch (error) {
       await this.showPopup({
         icon: 'error',
@@ -940,14 +1059,17 @@ class SetupWizard {
         challengeId: this.mfaState.challengeId,
         token,
       });
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.confirmMfaCodeBtn, false);
       this.mfaState.verified = true;
       this.mfaStatusHint.textContent = 'MFA confirmed. You can continue.';
-      this.mfaStatusHint.className = 'setup-hint setup-hint-success';
+      this.mfaStatusHint.className = 'zr-field__hint zr-ok-text';
       this.setupMfaCode.value = '';
     } catch (error) {
       this.mfaState.verified = false;
       this.mfaStatusHint.textContent = error.message;
-      this.mfaStatusHint.className = 'setup-hint setup-hint-error';
+      this.mfaStatusHint.className = 'zr-field__hint zr-danger-text';
     } finally {
       this.setButtonLoading(this.confirmMfaCodeBtn, false);
     }
@@ -973,9 +1095,13 @@ class SetupWizard {
 
     try {
       const result = await this.request('/api/setup/paperless/test', payload);
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.testPaperlessBtn, false);
       this.paperlessTestState.ran = true;
       this.paperlessTestState.success = Boolean(result.success);
       this.paperlessTestState.allowFailure = false;
+      this.paperlessTestState.signature = this.connectionSignatures().paperless;
 
       if (result.success) {
         this.setPillState(
@@ -983,6 +1109,10 @@ class SetupWizard {
           'success',
           'Connection valid'
         );
+        // Credentials are known good at this point, so the document scope step
+        // can be filled in the background instead of making the user press a
+        // separate button for data we can already fetch.
+        this.loadPaperlessMetadata({ silent: true });
         await this.showPopup({
           icon: 'success',
           title: 'Paperless test successful',
@@ -1010,23 +1140,28 @@ class SetupWizard {
     }
   }
 
-  async loadPaperlessMetadata() {
+  // Runs automatically once the connection test succeeds. `silent` keeps it out
+  // of the user's way: no dialogs, and a failure only shows up in the pill,
+  // because nothing here is required to finish the wizard.
+  async loadPaperlessMetadata(options = {}) {
+    const silent = Boolean(options.silent);
     const payload = {
       paperlessUrl: this.paperlessUrl.value.trim(),
       paperlessToken: this.paperlessToken.value.trim(),
     };
 
     if (!payload.paperlessUrl || !payload.paperlessToken) {
-      await this.showPopup({
-        icon: 'warning',
-        title: 'Missing values',
-        text: 'Enter and test Paperless credentials first.',
-      });
+      if (!silent) {
+        await this.showPopup({
+          icon: 'warning',
+          title: 'Missing values',
+          text: 'Enter and test Paperless credentials first.',
+        });
+      }
       return;
     }
 
-    this.setButtonLoading(this.fetchMetadataBtn, true, 'Loading...');
-    this.setPillState(this.metadataLoadStatePill, 'loading', 'Loading...');
+    this.setPillState(this.metadataLoadStatePill, 'loading', 'Loading…');
 
     try {
       const result = await this.request(
@@ -1051,13 +1186,13 @@ class SetupWizard {
     } catch (error) {
       this.metadataState.loaded = false;
       this.setPillState(this.metadataLoadStatePill, 'error', 'Load failed');
-      await this.showPopup({
-        icon: 'error',
-        title: 'Metadata loading failed',
-        text: error.message,
-      });
-    } finally {
-      this.setButtonLoading(this.fetchMetadataBtn, false);
+      if (!silent) {
+        await this.showPopup({
+          icon: 'error',
+          title: 'Metadata loading failed',
+          text: error.message,
+        });
+      }
     }
   }
 
@@ -1109,24 +1244,16 @@ class SetupWizard {
 
     if (this.excludeTags.length === 0) {
       const hint = document.createElement('p');
-      hint.className = 'setup-hint';
+      hint.className = 'zr-field__hint';
       hint.textContent = 'No excluded tags selected.';
       this.excludeTagsContainer.appendChild(hint);
       return;
     }
 
     this.excludeTags.forEach((tag) => {
-      const chip = document.createElement('button');
-      chip.type = 'button';
-      chip.className = 'setup-chip';
-      // Tag names are user input, so they are added as text nodes.
-      const label = document.createElement('span');
-      label.textContent = tag;
-      const icon = document.createElement('i');
-      icon.className = 'fas fa-xmark';
-      chip.append(label, icon);
-      chip.addEventListener('click', () => this.removeExcludeTag(tag));
-      this.excludeTagsContainer.appendChild(chip);
+      this.excludeTagsContainer.appendChild(
+        this.createTagChip(tag, () => this.removeExcludeTag(tag))
+      );
     });
   }
 
@@ -1205,6 +1332,9 @@ class SetupWizard {
         '/api/setup/quickstart/detect',
         payload
       );
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.quickstartDetectBtn, false);
       const detection = result.detection || {};
 
       this.quickstartState.detected = true;
@@ -1376,16 +1506,31 @@ class SetupWizard {
     }
 
     const iconPresets = {
-      pending: { className: 'fas fa-spinner fa-spin', color: '' },
-      success: { className: 'fas fa-circle-check', color: '#16a34a' },
-      error: { className: 'fas fa-circle-xmark', color: '#dc2626' },
-      skipped: { className: 'fas fa-circle-minus', color: '#94a3b8' },
+      pending: { symbol: 'i-refresh', spin: true, color: '' },
+      success: { symbol: 'i-check-circle', spin: false, color: 'var(--zr-ok)' },
+      error: {
+        symbol: 'i-alert-circle',
+        spin: false,
+        color: 'var(--zr-danger)',
+      },
+      skipped: {
+        symbol: 'i-minus',
+        spin: false,
+        color: 'var(--zr-text-faint)',
+      },
     };
     const preset = iconPresets[state] || iconPresets.pending;
 
     row.innerHTML = '';
-    const icon = document.createElement('i');
-    icon.className = preset.className;
+    const icon = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    icon.setAttribute(
+      'class',
+      `zr-icon zr-icon--sm${preset.spin ? ' zr-icon--spin' : ''}`
+    );
+    icon.setAttribute('aria-hidden', 'true');
+    const use = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    use.setAttribute('href', `/icons.svg#${preset.symbol}`);
+    icon.appendChild(use);
     if (preset.color) {
       icon.style.color = preset.color;
     }
@@ -1422,6 +1567,7 @@ class SetupWizard {
       if (result.resolvedApiUrl && this.aiApiUrl) {
         this.aiApiUrl.value = String(result.resolvedApiUrl).trim();
       }
+      this.aiTestState.signature = this.connectionSignatures().ai;
 
       this.setPillState(
         this.aiTestStatePill,
@@ -1470,6 +1616,7 @@ class SetupWizard {
       if (result.resolvedApiUrl && this.ocrApiUrl) {
         this.ocrApiUrl.value = String(result.resolvedApiUrl).trim();
       }
+      this.ocrTestState.signature = this.connectionSignatures().ocr;
 
       this.setPillState(
         this.ocrTestStatePill,
@@ -1644,6 +1791,9 @@ class SetupWizard {
     this.setButtonLoading(this.fetchAiModelsBtn, true, 'Loading...');
     try {
       const result = await this.request('/api/setup/ai/models', payload);
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.fetchAiModelsBtn, false);
       const models = Array.isArray(result.models) ? result.models : [];
 
       if (result.resolvedApiUrl && this.aiApiUrl) {
@@ -1696,20 +1846,15 @@ class SetupWizard {
       setupOcrValidationTimeoutMs: this.getOcrValidationTimeoutMs(),
     };
 
-    if (payload.provider === 'mistral' && !payload.apiKey) {
-      if (!silent) {
-        await this.showPopup({
-          icon: 'warning',
-          title: 'API key missing',
-          text: 'Mistral OCR requires an API key to discover models.',
-        });
-      }
-      return [];
-    }
-
+    // No local refusal on an empty field: an operator who already has
+    // MISTRAL_API_KEY in their compose file never types one here, and the route
+    // resolves it. Whether a key exists is the server's question to answer.
     this.setButtonLoading(this.fetchOcrModelsBtn, true, 'Loading...');
     try {
       const result = await this.request('/api/setup/ocr/models', payload);
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.fetchOcrModelsBtn, false);
       const models = Array.isArray(result.models) ? result.models : [];
 
       if (result.resolvedApiUrl && this.ocrApiUrl) {
@@ -1783,6 +1928,9 @@ class SetupWizard {
 
     try {
       const result = await this.request('/api/setup/ai/test', payload);
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.testAiBtn, false);
       this.aiTestState.ran = true;
       this.aiTestState.success = Boolean(result.success);
       this.aiTestState.allowFailure = false;
@@ -1790,6 +1938,9 @@ class SetupWizard {
       if (result.resolvedApiUrl && this.aiApiUrl) {
         this.aiApiUrl.value = String(result.resolvedApiUrl).trim();
       }
+      // After the resolved URL is written back, so the signature describes the
+      // endpoint that was actually reached.
+      this.aiTestState.signature = this.connectionSignatures().ai;
 
       if (result.success) {
         this.setPillState(this.aiTestStatePill, 'success', 'Connection valid');
@@ -1919,20 +2070,9 @@ class SetupWizard {
     }
 
     if (stepIndex === 3) {
-      if (!this.metadataState.loaded) {
-        const result = await this.showPopup({
-          icon: 'warning',
-          title: 'Metadata not loaded',
-          text: 'You have not loaded metadata yet. Continue anyway?',
-          showCancelButton: true,
-          confirmButtonText: 'Continue anyway',
-          cancelButtonText: 'Go back',
-        });
-
-        if (!result.isConfirmed) {
-          return false;
-        }
-      }
+      // Metadata loads by itself after the connection test and is only there to
+      // offer tag suggestions, so a missing load is not worth blocking on — a
+      // fresh Paperless install legitimately has no tags at all.
 
       if (
         !this.scanAllDocuments.checked &&
@@ -2192,7 +2332,46 @@ class SetupWizard {
     }
   }
 
+  /* What each test result vouches for. A bare "the AI test was green" flag
+     would survive the user paging back and editing the endpoint, and finalize
+     would then ask the server to trust a connection nobody probed. Comparing
+     these strings keeps the skip honest — change anything that defines the
+     connection and the stored result stops counting. Timeouts stay out: they
+     bound how long a probe may take, not what it talks to. */
+  connectionSignatures() {
+    return {
+      paperless: JSON.stringify([
+        this.paperlessUrl.value.trim(),
+        this.paperlessToken.value.trim(),
+      ]),
+      ai: JSON.stringify([
+        this.aiProvider.value.trim().toLowerCase(),
+        this.aiApiUrl.value.trim(),
+        this.aiToken.value.trim(),
+        this.aiModel.value.trim(),
+      ]),
+      ocr: JSON.stringify([
+        this.mistralOcrEnabled.value === 'yes',
+        (this.ocrProvider.value || 'mistral').toLowerCase(),
+        this.normalizeOcrApiUrlForProvider(
+          this.ocrProvider.value,
+          this.ocrApiUrl.value
+        ),
+        this.ocrApiKey.value.trim(),
+        this.mistralOcrModel.value.trim() || 'mistral-ocr-latest',
+      ]),
+    };
+  }
+
   buildFinalizePayload() {
+    const scanAll = this.scanAllDocuments.checked;
+    const signatures = this.connectionSignatures();
+    // Tells the server which connections the wizard already proved reachable
+    // with exactly these values, so it does not repeat the probes — and with
+    // them the billed AI round trip — a few seconds after the user watched
+    // them succeed.
+    const verified = (state, signature) =>
+      state.success && state.signature === signature;
     return {
       adminUsername: this.adminUsername.value.trim(),
       adminPassword: this.adminPassword.value,
@@ -2202,8 +2381,11 @@ class SetupWizard {
       paperlessUsername: this.paperlessUsername.value.trim(),
       paperlessToken: this.paperlessToken.value.trim(),
       scanAllDocuments: this.scanAllDocuments.checked,
-      includeTag: this.getEffectiveIncludeTags()[0] || '',
-      includeTags: this.getEffectiveIncludeTags(),
+      // Kept in the UI so toggling back restores them, but not submitted while
+      // "scan all" is on — the server would discard them anyway, and sending
+      // them made the payload disagree with the env preview shown next to it.
+      includeTag: scanAll ? '' : this.getEffectiveIncludeTags()[0] || '',
+      includeTags: scanAll ? [] : this.getEffectiveIncludeTags(),
       excludeTags: this.getEffectiveExcludeTags(),
       processedTag: this.processedTag.value.trim(),
       automaticScanEnabled: this.automaticScanEnabled.value === 'yes',
@@ -2216,6 +2398,12 @@ class SetupWizard {
       setupOcrValidationTimeoutMs: this.getOcrValidationTimeoutMs(),
       allowFailedPaperlessTest: this.paperlessTestState.allowFailure,
       allowFailedAiTest: this.aiTestState.allowFailure,
+      paperlessTestPassed: verified(
+        this.paperlessTestState,
+        signatures.paperless
+      ),
+      aiTestPassed: verified(this.aiTestState, signatures.ai),
+      ocrTestPassed: verified(this.ocrTestState, signatures.ocr),
       mistralOcrEnabled: this.mistralOcrEnabled.value === 'yes',
       ocrProvider: (this.ocrProvider.value || 'mistral').toLowerCase(),
       ocrApiUrl: this.normalizeOcrApiUrlForProvider(
@@ -2236,6 +2424,10 @@ class SetupWizard {
         validations.push(index);
         break;
       }
+      // Every gate that passes here is a step the user genuinely cleared. This
+      // also covers the quickstart flow, which saves straight from the AI step
+      // and would otherwise leave the later steps showing as pending.
+      this.markStepCompleted(index);
     }
 
     if (validations.length > 0) {
@@ -2266,7 +2458,15 @@ class SetupWizard {
     try {
       const payload = this.buildFinalizePayload();
       const result = await this.request('/api/setup/complete', payload);
+      // The result dialog is awaited below; reset the button first so it
+      // does not keep claiming the test is still running.
+      this.setButtonLoading(this.finalizeSetupBtn, false);
       const postRestartRedirectTarget = result.redirectTo || '/login';
+
+      // Only now is the wizard genuinely finished, so this is the point where
+      // the progress bar is allowed to read 100%.
+      this.markStepCompleted(this.steps.length - 1);
+      this.showStep(this.currentStep);
 
       if (result.envPreview) {
         this.envPreview.value = result.envPreview;
@@ -2287,19 +2487,16 @@ class SetupWizard {
           title: 'Restarting',
           text: `Container restart in ${countdown} seconds...`,
           showConfirmButton: false,
-          allowOutsideClick: false,
-          didOpen: () => {
+          onOpen: (handle) => {
             const intervalId = setInterval(() => {
               countdown -= 1;
               if (countdown < 0) {
                 clearInterval(intervalId);
+                handle.close();
                 window.location.href = postRestartRedirectTarget;
                 return;
               }
-
-              Swal.update({
-                text: `Container restart in ${countdown} seconds...`,
-              });
+              handle.setText(`Container restart in ${countdown} seconds...`);
             }, 1000);
           },
         });
