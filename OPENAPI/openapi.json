@@ -1020,8 +1020,9 @@
     },
     "/playground": {
       "get": {
-        "summary": "AI playground testing environment",
-        "description": "Renders the AI playground page for experimenting with document analysis.\n\nThis interactive environment allows users to test different AI providers and prompts\non document content without affecting the actual document processing workflow.\nUsers can paste document text, customize prompts, and see raw AI responses\nto better understand how the AI models analyze document content.\n\nThe playground is useful for fine-tuning prompts and testing AI capabilities\nbefore applying them to actual document processing.\n",
+        "deprecated": true,
+        "summary": "AI playground testing environment (deprecated)",
+        "description": "Renders the AI playground page for experimenting with document analysis.\n\nThis interactive environment allows users to test different AI providers and prompts\non document content without affecting the actual document processing workflow.\nUsers can paste document text, customize prompts, and see raw AI responses\nto better understand how the AI models analyze document content.\n\nThe playground is useful for fine-tuning prompts and testing AI capabilities\nbefore applying them to actual document processing.\n\nDeprecated: the page has been removed from the navigation and will be\nremoved entirely in a future release. Use /manual to try a prompt\nagainst a single document.\n",
         "tags": [
           "Navigation",
           "Documents"
@@ -1177,8 +1178,9 @@
     },
     "/api/playground/bootstrap": {
       "get": {
-        "summary": "Get playground bootstrap data",
-        "description": "Returns documents and metadata required to initialize the AI playground UI.",
+        "deprecated": true,
+        "summary": "Get playground bootstrap data (deprecated)",
+        "description": "Returns documents and metadata required to initialize the AI playground UI. Removed from the navigation and scheduled for removal.",
         "tags": [
           "Documents",
           "API"
@@ -2420,6 +2422,26 @@
               }
             }
           },
+          "400": {
+            "description": "Setup has not been completed yet",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean",
+                      "example": false
+                    },
+                    "error": {
+                      "type": "string",
+                      "example": "Setup not completed"
+                    }
+                  }
+                }
+              }
+            }
+          },
           "401": {
             "description": "Unauthorized - authentication required",
             "content": {
@@ -2728,12 +2750,53 @@
     "/api/setup/ocr/models": {
       "post": {
         "summary": "Discover available OCR models during setup",
+        "description": "Returns every discovered model that is not embedding-only. Vision\nsupport is detected from the model name, which recognizes families\nsuch as llava or pixtral and misses OCR-capable models with\nunremarkable names, so it ranks the list instead of filtering it:\n`visionModels` and `suggestedModel` are hints for the UI, not a\nrestriction on what may be selected.\n",
         "tags": [
           "Setup"
         ],
         "responses": {
           "200": {
-            "description": "OCR model list returned"
+            "description": "OCR model list returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "models": {
+                      "type": "array",
+                      "description": "Every selectable OCR model (embedding-only models excluded)",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "visionModels": {
+                      "type": "array",
+                      "description": "Subset of models whose name indicates vision support; absent for providers without model classification",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "suggestedModel": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Recommended default; absent for providers without model classification"
+                    },
+                    "resolvedApiUrl": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Model discovery failed"
           }
         }
       }
@@ -2839,6 +2902,101 @@
         }
       }
     },
+    "/api/settings/ocr/models": {
+      "post": {
+        "summary": "Discover available OCR models from the settings page",
+        "description": "Returns every discovered model that is not embedding-only. Vision\nsupport is detected from the model name, which recognizes families\nsuch as llava or pixtral and misses OCR-capable models with\nunremarkable names, so it ranks the list instead of filtering it:\n`visionModels` and `suggestedModel` are hints for the UI, not a\nrestriction on what may be selected.\n",
+        "tags": [
+          "Settings"
+        ],
+        "security": [
+          {
+            "BearerAuth": []
+          },
+          {
+            "ApiKeyAuth": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "provider": {
+                    "type": "string",
+                    "enum": [
+                      "mistral",
+                      "custom",
+                      "ollama"
+                    ]
+                  },
+                  "apiUrl": {
+                    "type": "string"
+                  },
+                  "apiKey": {
+                    "type": "string",
+                    "description": "Omit or leave empty to use the stored OCR_API_KEY / MISTRAL_API_KEY"
+                  },
+                  "setupOcrValidationTimeoutMs": {
+                    "type": "integer"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "OCR model list returned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": {
+                      "type": "boolean"
+                    },
+                    "models": {
+                      "type": "array",
+                      "description": "Every selectable OCR model (embedding-only models excluded)",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "visionModels": {
+                      "type": "array",
+                      "description": "Subset of models whose name indicates vision support; absent for providers without model classification",
+                      "items": {
+                        "type": "string"
+                      }
+                    },
+                    "suggestedModel": {
+                      "type": "string",
+                      "nullable": true,
+                      "description": "Recommended default; absent for providers without model classification"
+                    },
+                    "resolvedApiUrl": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Model discovery failed"
+          },
+          "401": {
+            "description": "Unauthorized"
+          }
+        }
+      }
+    },
     "/api/settings/quickstart/detect": {
       "post": {
         "summary": "Auto-detect API flavor and classify models from a single base URL",
@@ -2868,7 +3026,8 @@
                     "example": "http://192.168.1.5:1234"
                   },
                   "apiKey": {
-                    "type": "string"
+                    "type": "string",
+                    "description": "Omit or leave empty to use the stored CUSTOM_API_KEY / OLLAMA_API_KEY"
                   },
                   "setupValidationTimeoutMs": {
                     "type": "integer"
@@ -4333,7 +4492,8 @@
     },
     "/manual/playground": {
       "post": {
-        "summary": "Process document using a custom prompt in playground mode",
+        "deprecated": true,
+        "summary": "Process document using a custom prompt in playground mode (deprecated)",
         "description": "Analyzes document content using a custom user-provided prompt.\nThis endpoint is primarily used for testing and experimenting with different prompts\nwithout affecting the actual document processing workflow.\n\nThe analysis is performed using the AI provider configured in the application settings,\nbut with a custom prompt that overrides the default system prompt.\n",
         "tags": [
           "Documents",

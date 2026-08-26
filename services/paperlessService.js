@@ -1718,39 +1718,11 @@ class PaperlessService {
     try {
       // Explicit ID mode: exact lookup via GET /documents/{id}/
       if (mode === 'id') {
-        const id = Number.parseInt(normalizedQuery, 10);
-        if (!Number.isInteger(id) || id < 1 || String(id) !== normalizedQuery) {
-          return [];
-        }
-
-        try {
-          // Request only the selector fields so the document content, which can
-          // be megabytes on scanned files, is not transferred.
-          const response = await this.client.get(`/documents/${id}/`, {
-            params: { fields: documentFields },
-          });
-          const doc = response?.data;
-          if (!doc || doc.id == null) {
-            return [];
-          }
-          return [
-            {
-              id: doc.id,
-              title: doc.title,
-              tags: doc.tags,
-              correspondent: doc.correspondent,
-              created: doc.created || doc.created_date || doc.added || null,
-            },
-          ];
-        } catch (error) {
-          if (error?.response?.status !== 404) {
-            console.error(
-              `[ERROR] searching document by id ${id}:`,
-              error.message
-            );
-          }
-          return [];
-        }
+        const doc = await this._findDocumentById(
+          normalizedQuery,
+          documentFields
+        );
+        return doc ? [doc] : [];
       }
 
       const params = {
@@ -1775,37 +1747,109 @@ class PaperlessService {
         params.query = normalizedQuery;
       }
 
-      let response;
+      // The default scope runs the Paperless-ngx full-text search, which reads
+      // titles and content but never the document ID — so typing an ID found
+      // nothing on every selector without an explicit ID scope. Look the ID up
+      // alongside the search whenever the term could be one, and put the exact
+      // hit first. The lookup is started here rather than awaited so it
+      // overlaps the search and costs no wall-clock time; it resolves to null
+      // instead of rejecting, so the search keeps its own error handling.
+      const idLookup =
+        mode === 'all'
+          ? this._findDocumentById(normalizedQuery, documentFields)
+          : null;
+
+      let results = [];
       try {
-        response = await this.client.get('/documents/', { params });
+        let response;
+        try {
+          response = await this.client.get('/documents/', { params });
+        } catch (error) {
+          // Full-text search needs the Paperless-ngx search index and rejects
+          // malformed query syntax. Keep the selector usable by retrying with a
+          // plain title filter instead of returning nothing.
+          if (mode !== 'all') {
+            throw error;
+          }
+
+          console.warn(
+            `[DEBUG] Full-text document search failed (${error.message}), retrying with a title filter`
+          );
+
+          const fallbackParams = { ...params };
+          delete fallbackParams.query;
+          fallbackParams.title__icontains = normalizedQuery;
+          response = await this.client.get('/documents/', {
+            params: fallbackParams,
+          });
+        }
+
+        results = Array.isArray(response?.data?.results)
+          ? response.data.results
+          : [];
       } catch (error) {
-        // Full-text search needs the Paperless-ngx search index and rejects
-        // malformed query syntax. Keep the selector usable by retrying with a
-        // plain title filter instead of returning nothing.
+        // A broken search index takes both attempts down with it. An exact ID
+        // hit does not depend on the index and is the answer the user asked
+        // for, so it must survive the failure rather than be discarded on the
+        // way out.
         if (mode !== 'all') {
           throw error;
         }
 
-        console.warn(
-          `[DEBUG] Full-text document search failed (${error.message}), retrying with a title filter`
-        );
-
-        const fallbackParams = { ...params };
-        delete fallbackParams.query;
-        fallbackParams.title__icontains = normalizedQuery;
-        response = await this.client.get('/documents/', {
-          params: fallbackParams,
-        });
+        console.error('[ERROR] searching documents:', error.message);
       }
 
-      if (!Array.isArray(response?.data?.results)) {
-        return [];
+      const idMatch = idLookup ? await idLookup : null;
+      if (!idMatch) {
+        return results;
       }
 
-      return response.data.results;
+      // An exact ID hit is what the user asked for, so it leads — and it is
+      // filtered out of the search results rather than appearing twice.
+      return [
+        idMatch,
+        ...results.filter((doc) => doc?.id !== idMatch.id),
+      ].slice(0, safeLimit);
     } catch (error) {
       console.error('[ERROR] searching documents:', error.message);
       return [];
+    }
+  }
+
+  /* Exact document lookup shared by the ID scope and the default scope. Returns
+     null for anything that is not a plain positive integer without hitting
+     Paperless-ngx at all, and for a document that does not exist. A 404 is an
+     ordinary answer here — only a real transport or server failure is logged. */
+  async _findDocumentById(query, documentFields) {
+    const normalizedQuery = String(query || '').trim();
+    const id = Number.parseInt(normalizedQuery, 10);
+    if (!Number.isInteger(id) || id < 1 || String(id) !== normalizedQuery) {
+      return null;
+    }
+
+    try {
+      // Request only the selector fields so the document content, which can be
+      // megabytes on scanned files, is not transferred.
+      const response = await this.client.get(`/documents/${id}/`, {
+        params: { fields: documentFields },
+      });
+      const doc = response?.data;
+      if (!doc || doc.id == null) {
+        return null;
+      }
+
+      return {
+        id: doc.id,
+        title: doc.title,
+        tags: doc.tags,
+        correspondent: doc.correspondent,
+        created: doc.created || doc.created_date || doc.added || null,
+      };
+    } catch (error) {
+      if (error?.response?.status !== 404) {
+        console.error(`[ERROR] searching document by id ${id}:`, error.message);
+      }
+      return null;
     }
   }
 
@@ -2245,6 +2289,13 @@ class PaperlessService {
     }
   }
 
+  /* Resolving the own user ID used to hinge entirely on PAPERLESS_USERNAME
+     matching a name in the response, and returned null without a word when it
+     did not — a configured display name, a case difference or a token whose
+     user cannot list other users all ended in the same silent null. The
+     configured name still wins when it matches; a single-entry response is
+     taken at face value (that is what current_user=true asks for), and the
+     dead end says why. */
   async getOwnUserID() {
     this.initialize();
     try {
@@ -2255,17 +2306,44 @@ class PaperlessService {
         },
       });
 
-      if (response.data.results && response.data.results.length > 0) {
-        const userInfo = response.data.results;
-        //filter for username by process.env.PAPERLESS_USERNAME
-        const user = userInfo.find(
-          (user) => user.username === process.env.PAPERLESS_USERNAME
+      const users = Array.isArray(response?.data?.results)
+        ? response.data.results
+        : [];
+      if (users.length === 0) {
+        console.warn(
+          '[WARN] Could not resolve own user ID: Paperless-ngx returned no users.'
         );
-        if (user) {
-          console.log(`[DEBUG] Found own user ID: ${user.id}`);
-          return user.id;
-        }
+        return null;
       }
+
+      const configuredUsername = String(
+        process.env.PAPERLESS_USERNAME || ''
+      ).trim();
+      const matched = configuredUsername
+        ? users.find(
+            (user) =>
+              String(user?.username || '')
+                .trim()
+                .toLowerCase() === configuredUsername.toLowerCase()
+          )
+        : null;
+
+      if (matched?.id != null) {
+        console.log(`[DEBUG] Found own user ID: ${matched.id}`);
+        return matched.id;
+      }
+
+      if (users.length === 1 && users[0]?.id != null) {
+        console.log(
+          `[DEBUG] Found own user ID: ${users[0].id} (current user, no PAPERLESS_USERNAME match)`
+        );
+        return users[0].id;
+      }
+
+      console.warn(
+        `[WARN] Could not resolve own user ID: ${users.length} user(s) returned and none matches ` +
+          `PAPERLESS_USERNAME (${configuredUsername || 'not set'}).`
+      );
       return null;
     } catch (error) {
       console.error('[ERROR] fetching own user ID:', error.message);
