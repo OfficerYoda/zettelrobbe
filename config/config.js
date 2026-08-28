@@ -559,6 +559,7 @@ module.exports = {
       process.env.OCR_AUTO_PROCESS_BATCH_SIZE || '10',
       10
     ),
+    autoQueueTags: process.env.OCR_AUTO_QUEUE_TAGS || '',
     // Run AI analysis right after OCR. Defaults to yes because a failed
     // content write-back leaves the OCR text local-only, where a regular
     // scan would never pick it up.
