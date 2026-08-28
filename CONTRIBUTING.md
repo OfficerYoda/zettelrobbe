@@ -23,8 +23,13 @@ saves everyone some friction.
 ## How the code gets written
 
 Openly: most of the code here is written with AI assistance, and has been from the
-start. I am an IT architect, not a JavaScript developer. I set the architecture, read
-and audit what comes back, and run it against my own live instance before it ships.
+start. I am an IT architect by trade, not a JavaScript developer.
+
+What that leaves me is the part that decides whether the software is any good: what it
+should do and what it should not, which features get cut instead of built, whether a
+diff actually solves the problem it claims to, and whether the result survives contact
+with my own documents — which it gets every day, because this is what I file my own
+paperwork with. Features have been removed from this project on that basis, not added.
 The [README FAQ](README.md#-frequently-asked-questions) has the longer version.
 
 Two consequences worth knowing before you file an issue or send a PR:
