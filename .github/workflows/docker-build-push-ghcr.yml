@@ -1,0 +1,88 @@
+name: Build and Push Image (GHCR)
+
+# Personal-fork workflow: build the app image on every push to the default
+# branch and publish it to the GitHub Container Registry so a VPS can pull it.
+# The layered app Dockerfile pulls its base (admonstrator/zettelrobbe:latest-base)
+# from Docker Hub, so no separate base build is needed.
+#
+# Tags published per run:
+#   ghcr.io/<owner>/zettelrobbe:latest   (only on the default branch)
+#   ghcr.io/<owner>/zettelrobbe:main     (branch name)
+#   ghcr.io/<owner>/zettelrobbe:sha-<abc1234>  (7-char commit sha)
+
+on:
+  push:
+    branches:
+      - main
+    paths-ignore:
+      - '**.md'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-ghcr-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  build:
+    name: Build and Push
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v4
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v6
+        with:
+          images: ${{ env.REGISTRY }}/${{ github.repository }}
+          tags: |
+            type=raw,value=latest,enable=${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) }}
+            type=ref,event=branch
+            type=sha,prefix=sha-
+
+      - name: Build and Push image
+        id: push
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ./Dockerfile
+          build-args: |
+            PAPERLESS_AI_COMMIT_SHA=${{ github.sha }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build summary
+        env:
+          IMAGE: ${{ github.repository }}
+        run: |
+          IMAGE="${IMAGE,,}"
+          echo "### Image published" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo '```bash' >> $GITHUB_STEP_SUMMARY
+          echo "docker login ghcr.io --username $GITHUB_ACTOR" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ghcr.io/${IMAGE}:latest" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "Tags: \`${{ steps.meta.outputs.tags }}\`" >> $GITHUB_STEP_SUMMARY
