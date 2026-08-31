@@ -563,6 +563,11 @@ module.exports = {
     // content write-back leaves the OCR text local-only, where a regular
     // scan would never pick it up.
     autoAnalyze: parseEnvBoolean(process.env.OCR_AUTO_ANALYZE, 'yes'),
+    // Documents carrying this tag are force-queued for OCR on every scan,
+    // regardless of content length or the TAGS include-filter. The tag is
+    // removed once the OCR text is written back to Paperless-ngx. Empty
+    // disables the feature.
+    triggerTag: (process.env.OCR_TRIGGER_TAG || '').trim(),
   },
   customFields: process.env.CUSTOM_FIELDS || '',
   aiProvider: process.env.AI_PROVIDER || 'openai',

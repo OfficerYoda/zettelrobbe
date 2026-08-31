@@ -1087,6 +1087,35 @@ async function scanDocuments(source = 'scheduler') {
     // Extract tag names from tag objects
     const existingTagNames = existingTags.map((tag) => tag.name);
 
+    // OCR trigger tag: any document carrying the configured tag is force-queued
+    // for OCR here, regardless of content length or the TAGS include-filter.
+    // The OCR queue drain (ocrAutoProcessService) processes it and the trigger
+    // tag is removed on a successful write-back inside processQueueItem().
+    if (mistralOcrService.isEnabled() && config.mistralOcr.triggerTag) {
+      try {
+        const triggerTagged = await paperlessService.getDocumentIdsByTagName(
+          config.mistralOcr.triggerTag
+        );
+        let enqueued = 0;
+        for (const tagged of triggerTagged) {
+          const changed = await documentModel.addToOcrQueue(
+            tagged.id,
+            tagged.title,
+            'trigger_tag'
+          );
+          if (changed) enqueued += 1;
+        }
+        if (triggerTagged.length > 0) {
+          console.info(
+            `[OCR] Trigger tag "${config.mistralOcr.triggerTag}" matched ${triggerTagged.length} document(s); ${enqueued} newly queued for OCR.`
+          );
+        }
+      } catch (error) {
+        console.error(`[ERROR] OCR trigger tag scan failed: ${error.message}`);
+        console.debug(error);
+      }
+    }
+
     for (const doc of documents) {
       if (scanControl.stopRequested) {
         scanStats.stopRequested = true;

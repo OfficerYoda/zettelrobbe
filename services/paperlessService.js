@@ -2224,6 +2224,135 @@ class PaperlessService {
     }
   }
 
+  /**
+   * Fetches all documents that carry a given tag, by tag name.
+   *
+   * Unlike getAllDocuments(), this ignores PROCESS_PREDEFINED_DOCUMENTS/TAGS
+   * and IGNORE_TAGS: the OCR trigger tag is an explicit, user-driven request to
+   * OCR a document, so it must find the document regardless of the scan scope.
+   *
+   * @param {string} tagName
+   * @returns {Promise<Array<{id: number, title: string}>>} empty if the tag
+   *   name is empty, cannot be resolved, or the client is not initialized.
+   */
+  async getDocumentIdsByTagName(tagName) {
+    this.initialize();
+    if (!this.client) {
+      console.error('[DEBUG] Client not initialized');
+      return [];
+    }
+
+    const normalizedName = String(tagName || '').trim();
+    if (!normalizedName) {
+      return [];
+    }
+
+    const tagIds = await this.resolveTagIdsByName([normalizedName]);
+    if (tagIds.length === 0) {
+      console.warn(
+        `[DEBUG] OCR trigger tag "${normalizedName}" was not found in Paperless-ngx`
+      );
+      return [];
+    }
+
+    const documents = [];
+    let page = 1;
+    let hasMore = true;
+
+    while (hasMore) {
+      try {
+        const params = {
+          page,
+          page_size: 100,
+          fields: 'id,title',
+          ordering: 'id',
+          tags__id__in: tagIds.join(','),
+        };
+
+        const response = await this.client.get('/documents/', { params });
+
+        if (!response?.data?.results || !Array.isArray(response.data.results)) {
+          console.error(
+            `[DEBUG] Invalid API response on page ${page} while fetching tagged documents`
+          );
+          break;
+        }
+
+        for (const doc of response.data.results) {
+          documents.push({ id: doc.id, title: doc.title });
+        }
+
+        hasMore = response.data.next !== null;
+        page++;
+
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      } catch (error) {
+        console.error(
+          `[ERROR] fetching documents for tag "${normalizedName}" page ${page}:`,
+          error.message
+        );
+        break;
+      }
+    }
+
+    return documents;
+  }
+
+  /**
+   * Removes a single tag (by name) from a document, leaving every other tag in
+   * place. No-op when the tag name is empty, the tag cannot be resolved, or the
+   * document does not carry it.
+   *
+   * @param {number} documentId
+   * @param {string} tagName
+   * @returns {Promise<boolean>} true if the tag was removed, false otherwise.
+   */
+  async removeTagFromDocument(documentId, tagName) {
+    this.initialize();
+    if (!this.client) return false;
+
+    const normalizedName = String(tagName || '').trim();
+    if (!normalizedName) return false;
+
+    const tagIds = await this.resolveTagIdsByName([normalizedName]);
+    if (tagIds.length === 0) {
+      console.warn(
+        `[DEBUG] Cannot remove tag "${normalizedName}" from document ${documentId}: tag not found`
+      );
+      return false;
+    }
+    const tagId = tagIds[0];
+
+    try {
+      const currentDoc = await this.getDocument(documentId);
+      const currentTags = Array.isArray(currentDoc?.tags)
+        ? currentDoc.tags
+        : [];
+
+      if (!currentTags.includes(tagId)) {
+        console.log(
+          `[DEBUG] Document ${documentId} does not carry tag "${normalizedName}"; nothing to remove`
+        );
+        return false;
+      }
+
+      const keepTagIds = currentTags.filter((id) => id !== tagId);
+      await this.client.patch(`/documents/${documentId}/`, {
+        tags: keepTagIds,
+      });
+      console.log(
+        `[DEBUG] Removed tag "${normalizedName}" (id ${tagId}) from document ${documentId}`
+      );
+      return true;
+    } catch (error) {
+      console.error(
+        `[ERROR] removing tag "${normalizedName}" from document ${documentId}:`,
+        error.message
+      );
+      throw error;
+    }
+  }
+
   async getTagTextFromId(tagId) {
     this.initialize();
     try {

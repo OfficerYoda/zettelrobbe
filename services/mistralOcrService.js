@@ -831,6 +831,27 @@ class MistralOcrService {
         wroteBack
       );
 
+      // Remove the OCR trigger tag once the text is safely back in
+      // Paperless-ngx. A refused write-back keeps the tag so the next scan
+      // re-queues the document; tag-removal failure must never fail the run.
+      if (
+        wroteBack &&
+        queueItem?.reason === 'trigger_tag' &&
+        config.mistralOcr?.triggerTag
+      ) {
+        try {
+          await PaperlessService.removeTagFromDocument(
+            normalizedDocumentId,
+            config.mistralOcr.triggerTag
+          );
+          emit('writeback', 'Removed OCR trigger tag from document.');
+        } catch (tagErr) {
+          console.error(
+            `[OCR] Failed to remove trigger tag from document ${normalizedDocumentId}: ${tagErr.message}`
+          );
+        }
+      }
+
       let aiResult = null;
       if (autoAnalyze) {
         emit('ai', 'Starting AI analysis with OCR text…');

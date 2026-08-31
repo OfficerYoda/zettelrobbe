@@ -875,6 +875,11 @@ const quickstartKeyStored =
                                     </div>
                                     <p class="zr-field__hint">Used for OCR model loading, connection tests and document processing</p>
                                 </div>
+                                <div class="zr-field zr-field--stacked">
+                                    <label for="ocrTriggerTag" class="zr-field__name">OCR Trigger Tag</label>
+                                    <input type="text" id="ocrTriggerTag" name="ocrTriggerTag" value="<%= config.OCR_TRIGGER_TAG || '' %>" class="zr-input" placeholder="Leave empty to disable">
+                                    <p class="zr-field__hint">Documents carrying this tag are queued for OCR on every scan, regardless of content length; the tag is removed once the OCR text is written back · Requires automatic OCR processing to drain the queue · Restart required</p>
+                                </div>
                                 <div class="zr-row zr-row--wrap">
                                     <button type="button" id="testOcrBtn" class="zr-btn">
                                         <svg class="zr-icon zr-icon--sm" aria-hidden="true"><use href="/icons.svg#i-flask"/></svg>

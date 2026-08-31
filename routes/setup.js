@@ -3782,6 +3782,7 @@ const ENV_EXPORT_GROUPS = [
       'OCR_AUTO_PROCESS_INTERVAL',
       'OCR_AUTO_PROCESS_BATCH_SIZE',
       'OCR_AUTO_ANALYZE',
+      'OCR_TRIGGER_TAG',
       'SETUP_OCR_VALIDATION_TIMEOUT_MS',
     ],
   },
@@ -3884,6 +3885,7 @@ function toEnvPreviewLines(config) {
     'OCR_AUTO_PROCESS_INTERVAL',
     'OCR_AUTO_PROCESS_BATCH_SIZE',
     'OCR_AUTO_ANALYZE',
+    'OCR_TRIGGER_TAG',
   ];
 
   return previewKeys
@@ -6806,6 +6808,7 @@ router.get('/settings', async (req, res) => {
     OCR_AUTO_PROCESS_BATCH_SIZE:
       process.env.OCR_AUTO_PROCESS_BATCH_SIZE || '10',
     OCR_AUTO_ANALYZE: process.env.OCR_AUTO_ANALYZE || 'yes',
+    OCR_TRIGGER_TAG: process.env.OCR_TRIGGER_TAG || '',
     SETUP_OCR_VALIDATION_TIMEOUT_MS:
       process.env.SETUP_OCR_VALIDATION_TIMEOUT_MS ||
       process.env.SETUP_VALIDATION_TIMEOUT_MS ||
@@ -8264,6 +8267,10 @@ router.get('/health', async (req, res) => {
  *                 type: string
  *                 description: Run AI analysis directly after automatic OCR (yes/no)
  *                 example: "yes"
+ *               ocrTriggerTag:
+ *                 type: string
+ *                 description: Documents carrying this tag are force-queued for OCR on every scan; the tag is removed after a successful write-back. Empty disables the feature.
+ *                 example: "needs-ocr"
  *               dateFormat:
  *                 type: string
  *                 description: How every date in the web interface is rendered
@@ -8371,6 +8378,7 @@ router.post('/settings', express.json(), async (req, res) => {
       ocrAutoProcessInterval,
       ocrAutoProcessBatchSize,
       ocrAutoAnalyze,
+      ocrTriggerTag,
       globalRateLimitWindowMs,
       globalRateLimitMax,
       trustProxy,
@@ -8467,6 +8475,7 @@ router.post('/settings', express.json(), async (req, res) => {
       OCR_AUTO_PROCESS_BATCH_SIZE:
         process.env.OCR_AUTO_PROCESS_BATCH_SIZE || '10',
       OCR_AUTO_ANALYZE: process.env.OCR_AUTO_ANALYZE || 'yes',
+      OCR_TRIGGER_TAG: process.env.OCR_TRIGGER_TAG || '',
       GLOBAL_RATE_LIMIT_WINDOW_MS:
         process.env.GLOBAL_RATE_LIMIT_WINDOW_MS || '900000',
       GLOBAL_RATE_LIMIT_MAX: process.env.GLOBAL_RATE_LIMIT_MAX || '1000',
@@ -8920,6 +8929,9 @@ router.post('/settings', express.json(), async (req, res) => {
         );
         updatedConfig.OCR_AUTO_PROCESS_BATCH_SIZE = '10';
       }
+    }
+    if (ocrTriggerTag !== undefined) {
+      updatedConfig.OCR_TRIGGER_TAG = String(ocrTriggerTag).trim();
     }
     updatedConfig.SETUP_OCR_VALIDATION_TIMEOUT_MS = String(
       effectiveOcrValidationTimeoutMs
