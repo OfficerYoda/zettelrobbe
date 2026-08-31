@@ -840,9 +840,12 @@ const quickstartKeyStored =
                                             <p class="zr-field__hint">Higher values improve OCR accuracy but increase image size (72–300) · Restart required</p>
                                         </div>
                                         <div class="zr-field zr-field--stacked">
-                                            <label for="ocrPdfRenderTimeoutMs" class="zr-field__name">PDF Render Timeout (ms)</label>
-                                            <input type="number" id="ocrPdfRenderTimeoutMs" name="ocrPdfRenderTimeoutMs" min="1000" max="600000" step="1000" value="<%= config.OCR_PDF_RENDER_TIMEOUT_MS || 120000 %>" class="zr-input">
-                                            <p class="zr-field__hint">Max time to render one document; raise it for large or high-DPI pages on slow hosts, or a truncated page image fails OCR (1000–600000) · Restart required</p>
+                                            <label for="ocrPdfRenderTimeoutMs" class="zr-field__name">PDF Render Timeout</label>
+                                            <div class="zr-row">
+                                                <input type="number" id="ocrPdfRenderTimeoutMs" name="ocrPdfRenderTimeoutMs" min="1" max="600" step="1" value="<%= Math.round(Number(config.OCR_PDF_RENDER_TIMEOUT_MS || 120000) / 1000) %>" class="zr-input">
+                                                <span class="zr-xs zr-faint" style="white-space: nowrap">seconds</span>
+                                            </div>
+                                            <p class="zr-field__hint">Max time to render one document; raise it for large or high-DPI pages on slow hosts, or a truncated page image fails OCR (1–600) · Restart required</p>
                                         </div>
                                     </div>
                                 </div>

@@ -8893,13 +8893,16 @@ router.post('/settings', express.json(), async (req, res) => {
       }
     }
     if (ocrPdfRenderTimeoutMs !== undefined) {
-      const pdfRenderTimeoutMs = parseInt(ocrPdfRenderTimeoutMs, 10);
+      // The UI submits seconds (like the OCR Timeout field); store milliseconds.
+      const pdfRenderTimeoutSeconds = parseInt(ocrPdfRenderTimeoutMs, 10);
       if (
-        !isNaN(pdfRenderTimeoutMs) &&
-        pdfRenderTimeoutMs >= 1000 &&
-        pdfRenderTimeoutMs <= 600000
+        !isNaN(pdfRenderTimeoutSeconds) &&
+        pdfRenderTimeoutSeconds >= 1 &&
+        pdfRenderTimeoutSeconds <= 600
       ) {
-        updatedConfig.OCR_PDF_RENDER_TIMEOUT_MS = pdfRenderTimeoutMs.toString();
+        updatedConfig.OCR_PDF_RENDER_TIMEOUT_MS = (
+          pdfRenderTimeoutSeconds * 1000
+        ).toString();
       } else {
         console.warn(
           `[WARN] Invalid OCR_PDF_RENDER_TIMEOUT_MS value: ${ocrPdfRenderTimeoutMs}. Using default: 120000`
