@@ -2831,6 +2831,10 @@ function initializeRuntimeOverridePills() {
     { selector: '#ocrPdfRenderMaxPages', envKey: 'OCR_PDF_RENDER_MAX_PAGES' },
     { selector: '#ocrPdfRenderDpi', envKey: 'OCR_PDF_RENDER_DPI' },
     {
+      selector: '#ocrPdfRenderTimeoutMs',
+      envKey: 'OCR_PDF_RENDER_TIMEOUT_MS',
+    },
+    {
       selector: '#ocrAutoProcessEnabled',
       envKey: 'OCR_AUTO_PROCESS_ENABLED',
     },

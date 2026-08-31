@@ -3778,6 +3778,7 @@ const ENV_EXPORT_GROUPS = [
       'OCR_PDF_RENDER_ENABLED',
       'OCR_PDF_RENDER_MAX_PAGES',
       'OCR_PDF_RENDER_DPI',
+      'OCR_PDF_RENDER_TIMEOUT_MS',
       'OCR_AUTO_PROCESS_ENABLED',
       'OCR_AUTO_PROCESS_INTERVAL',
       'OCR_AUTO_PROCESS_BATCH_SIZE',
@@ -3881,6 +3882,7 @@ function toEnvPreviewLines(config) {
     'OCR_PDF_RENDER_ENABLED',
     'OCR_PDF_RENDER_MAX_PAGES',
     'OCR_PDF_RENDER_DPI',
+    'OCR_PDF_RENDER_TIMEOUT_MS',
     'OCR_AUTO_PROCESS_ENABLED',
     'OCR_AUTO_PROCESS_INTERVAL',
     'OCR_AUTO_PROCESS_BATCH_SIZE',
@@ -6802,6 +6804,8 @@ router.get('/settings', async (req, res) => {
     OCR_PDF_RENDER_ENABLED: process.env.OCR_PDF_RENDER_ENABLED || 'yes',
     OCR_PDF_RENDER_MAX_PAGES: process.env.OCR_PDF_RENDER_MAX_PAGES || '10',
     OCR_PDF_RENDER_DPI: process.env.OCR_PDF_RENDER_DPI || '150',
+    OCR_PDF_RENDER_TIMEOUT_MS:
+      process.env.OCR_PDF_RENDER_TIMEOUT_MS || '120000',
     OCR_AUTO_PROCESS_ENABLED: process.env.OCR_AUTO_PROCESS_ENABLED || 'no',
     OCR_AUTO_PROCESS_INTERVAL:
       process.env.OCR_AUTO_PROCESS_INTERVAL || '*/15 * * * *',
@@ -8374,6 +8378,7 @@ router.post('/settings', express.json(), async (req, res) => {
       ocrPdfRenderEnabled,
       ocrPdfRenderMaxPages,
       ocrPdfRenderDpi,
+      ocrPdfRenderTimeoutMs,
       ocrAutoProcessEnabled,
       ocrAutoProcessInterval,
       ocrAutoProcessBatchSize,
@@ -8469,6 +8474,8 @@ router.post('/settings', express.json(), async (req, res) => {
       OCR_PDF_RENDER_ENABLED: process.env.OCR_PDF_RENDER_ENABLED || 'yes',
       OCR_PDF_RENDER_MAX_PAGES: process.env.OCR_PDF_RENDER_MAX_PAGES || '10',
       OCR_PDF_RENDER_DPI: process.env.OCR_PDF_RENDER_DPI || '150',
+      OCR_PDF_RENDER_TIMEOUT_MS:
+        process.env.OCR_PDF_RENDER_TIMEOUT_MS || '120000',
       OCR_AUTO_PROCESS_ENABLED: process.env.OCR_AUTO_PROCESS_ENABLED || 'no',
       OCR_AUTO_PROCESS_INTERVAL:
         process.env.OCR_AUTO_PROCESS_INTERVAL || '*/15 * * * *',
@@ -8883,6 +8890,21 @@ router.post('/settings', express.json(), async (req, res) => {
           `[WARN] Invalid OCR_PDF_RENDER_DPI value: ${ocrPdfRenderDpi}. Using default: 150`
         );
         updatedConfig.OCR_PDF_RENDER_DPI = '150';
+      }
+    }
+    if (ocrPdfRenderTimeoutMs !== undefined) {
+      const pdfRenderTimeoutMs = parseInt(ocrPdfRenderTimeoutMs, 10);
+      if (
+        !isNaN(pdfRenderTimeoutMs) &&
+        pdfRenderTimeoutMs >= 1000 &&
+        pdfRenderTimeoutMs <= 600000
+      ) {
+        updatedConfig.OCR_PDF_RENDER_TIMEOUT_MS = pdfRenderTimeoutMs.toString();
+      } else {
+        console.warn(
+          `[WARN] Invalid OCR_PDF_RENDER_TIMEOUT_MS value: ${ocrPdfRenderTimeoutMs}. Using default: 120000`
+        );
+        updatedConfig.OCR_PDF_RENDER_TIMEOUT_MS = '120000';
       }
     }
     if (typeof ocrAutoProcessEnabled === 'string') {
