@@ -106,6 +106,17 @@ class MistralOcrService {
     return Math.min(Math.max(parsed, 72), 300);
   }
 
+  get pdfRenderTimeoutMs() {
+    const parsed = Number.parseInt(
+      String(config.mistralOcr?.pdfRenderTimeoutMs ?? ''),
+      10
+    );
+    if (!Number.isFinite(parsed) || parsed < 1000) {
+      return 120000;
+    }
+    return parsed;
+  }
+
   isDocumentActivelyProcessing(documentId) {
     const normalizedDocumentId = Number(documentId);
     return (
@@ -269,6 +280,7 @@ class MistralOcrService {
             {
               maxPages: this.pdfRenderMaxPages,
               dpi: this.pdfRenderDpi,
+              timeoutMs: this.pdfRenderTimeoutMs,
             }
           );
         } catch (renderError) {
@@ -373,6 +385,34 @@ class MistralOcrService {
   }
 
   /**
+   * Extract the model's answer from a chat message object. Reasoning-capable
+   * vision models (e.g. minicpm-v, qwen-based OCR models) sometimes leave
+   * `content` empty and emit the whole answer into a reasoning channel
+   * instead — `thinking` on Ollama's native /api/chat, `reasoning` or
+   * `reasoning_content` on OpenAI-compatible endpoints. Treating an empty
+   * `content` as failure discards a perfectly good OCR result and fails the
+   * document, so fall back to those fields.
+   * @param {object|undefined|null} message
+   * @returns {string}
+   */
+  _extractMessageText(message) {
+    if (!message || typeof message !== 'object') {
+      return '';
+    }
+    const primary = String(message.content || '').trim();
+    if (primary) {
+      return primary;
+    }
+    for (const key of ['thinking', 'reasoning', 'reasoning_content']) {
+      const fallback = String(message[key] || '').trim();
+      if (fallback) {
+        return fallback;
+      }
+    }
+    return '';
+  }
+
+  /**
    * Run a single image through the local vision model, trying the
    * OpenAI-compatible and Ollama-native endpoints in the detected order.
    * @param {string} imageBase64
@@ -432,9 +472,7 @@ class MistralOcrService {
     const runOpenAiLikeWithFallback = async (targetApiUrl) => {
       try {
         const response = await runOpenAiLikeRequest(targetApiUrl, imageDataUrl);
-        return String(
-          response.data?.choices?.[0]?.message?.content || ''
-        ).trim();
+        return this._extractMessageText(response.data?.choices?.[0]?.message);
       } catch (error) {
         const providerMessage = String(
           error?.response?.data?.error?.message ||
@@ -453,9 +491,7 @@ class MistralOcrService {
             targetApiUrl,
             imageBase64
           );
-          return String(
-            response.data?.choices?.[0]?.message?.content || ''
-          ).trim();
+          return this._extractMessageText(response.data?.choices?.[0]?.message);
         }
 
         throw error;
@@ -489,7 +525,7 @@ class MistralOcrService {
         }
       );
 
-      return String(response.data?.message?.content || '').trim();
+      return this._extractMessageText(response.data?.message);
     };
 
     const requestStrategies =

@@ -177,8 +177,8 @@ async function main() {
   );
   assert.deepStrictEqual(
     state.renderCalls[0].options,
-    { maxPages: 10, dpi: 150 },
-    'Expected configured maxPages and dpi to reach the renderer'
+    { maxPages: 10, dpi: 150, timeoutMs: 120000 },
+    'Expected configured maxPages, dpi and render timeout to reach the renderer'
   );
   assert.strictEqual(
     state.renderCalls[0].bufferLength,

@@ -547,6 +547,13 @@ module.exports = {
       10
     ),
     pdfRenderDpi: parseInt(process.env.OCR_PDF_RENDER_DPI || '150', 10),
+    // Hard limit for a single pdftoppm invocation. Large/high-DPI pages can
+    // render slowly on constrained hosts; a too-low timeout kills pdftoppm
+    // mid-write and leaves a truncated page image that the OCR model rejects.
+    pdfRenderTimeoutMs: parseInt(
+      process.env.OCR_PDF_RENDER_TIMEOUT_MS || '120000',
+      10
+    ),
     // Automatic draining of the OCR queue. Without it the queue is only
     // emptied by hand via "Process All Pending" on the /ocr page.
     autoProcessEnabled: parseEnvBoolean(

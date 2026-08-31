@@ -13,7 +13,15 @@ const os = require('os');
 const path = require('path');
 
 const PROBE_TIMEOUT_MS = 5000;
-const RENDER_TIMEOUT_MS = 60000;
+const DEFAULT_RENDER_TIMEOUT_MS = 120000;
+// PNG magic number (first 8 bytes) and the trailing IEND chunk marker. A file
+// that lacks either was never finished being written — pdftoppm was killed
+// mid-render (e.g. hit the render timeout on a large/high-DPI page) — and must
+// not be shipped to the OCR model, which rejects it with an HTTP 400.
+const PNG_SIGNATURE = Buffer.from([
+  0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+]);
+const PNG_IEND = Buffer.from('IEND', 'latin1');
 // pdftoppm writes images to files; stdout/stderr only carry diagnostics.
 const MAX_STDIO_BUFFER_BYTES = 1024 * 1024;
 // Defensive cap so a single rendered page cannot blow up request payloads.
@@ -54,16 +62,39 @@ class PopplerService {
   }
 
   /**
+   * Whether a buffer holds a complete PNG file: the 8-byte signature at the
+   * start and the IEND chunk marker near the end. pdftoppm writes files
+   * incrementally, so a process killed mid-write leaves a valid-looking prefix
+   * with no IEND — exactly the corruption that makes the OCR model return 400.
+   * @param {Buffer} buffer
+   * @returns {boolean}
+   */
+  isCompletePng(buffer) {
+    if (!Buffer.isBuffer(buffer) || buffer.length < 16) {
+      return false;
+    }
+    if (!buffer.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE)) {
+      return false;
+    }
+    // The IEND chunk is the last 12 bytes; search the tail generously.
+    return buffer.subarray(-16).includes(PNG_IEND);
+  }
+
+  /**
    * Render the first pages of a PDF to PNG images via pdftoppm.
    * @param {Buffer} pdfBuffer - raw PDF bytes
-   * @param {{maxPages: number, dpi: number}} options
+   * @param {{maxPages: number, dpi: number, timeoutMs?: number}} options
    * @returns {Promise<{
    *   pages: Array<{base64: string, mimeType: string, pageNumber: number}>,
    *   totalPages: number|null,
    *   truncated: boolean
    * }>}
    */
-  async renderPdfToImages(pdfBuffer, { maxPages, dpi }) {
+  async renderPdfToImages(pdfBuffer, { maxPages, dpi, timeoutMs }) {
+    const renderTimeoutMs =
+      Number.isFinite(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : DEFAULT_RENDER_TIMEOUT_MS;
     const tempDir = await fs.mkdtemp(
       path.join(os.tmpdir(), 'paperless-ai-ocr-')
     );
@@ -89,7 +120,7 @@ class PopplerService {
             outputPrefix,
           ],
           {
-            timeout: RENDER_TIMEOUT_MS,
+            timeout: renderTimeoutMs,
             killSignal: 'SIGKILL',
             maxBuffer: MAX_STDIO_BUFFER_BYTES,
           }
@@ -137,6 +168,15 @@ class PopplerService {
           );
           continue;
         }
+        // A killed pdftoppm leaves the in-flight page half-written. Sending it
+        // to the OCR model fails the whole document with an HTTP 400, so drop
+        // any page whose PNG is incomplete rather than shipping garbage.
+        if (!this.isCompletePng(fileBuffer)) {
+          console.warn(
+            `[OCR] Skipping rendered page ${pageNumber}: PNG is incomplete (pdftoppm was likely killed mid-render — raise OCR_PDF_RENDER_TIMEOUT_MS or lower OCR_PDF_RENDER_DPI)`
+          );
+          continue;
+        }
         pages.push({
           base64: fileBuffer.toString('base64'),
           mimeType: 'image/png',
@@ -145,7 +185,9 @@ class PopplerService {
       }
 
       if (pages.length === 0) {
-        throw new Error('pdftoppm produced only oversized page images');
+        throw new Error(
+          'pdftoppm produced no usable page images (all pages were oversized or incomplete)'
+        );
       }
 
       // Only when the page limit was hit is the total page count interesting
